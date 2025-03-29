@@ -6,22 +6,20 @@ export const createAndLaunchToken = async (
   fundWallet: Keypair,
   tokenName: string,
   tokenSymbol: string,
-  targetSol: number, // Target amount (e.g., 9.204131229 SOL)
+  targetSol: number,
   targetWallet: PublicKey
 ): Promise<string> => {
-  const launchFee = 0.1;
+  const launchFee = 0.1; // This should be the initialFeePaid, but for mock purposes, we'll use 0.1
 
-  // Assume 0.1 SOL is already in fundWallet (paid by user)
   console.log(`Using ${launchFee} SOL from campaign wallet as gas fee`);
   console.log(`Creating token with ${targetSol} SOL for ${tokenName} (${tokenSymbol})`);
 
-  // Mock pump.fun token creation (replace with real API)
   const response = await axios.post("https://pump.fun/api/create-token", {
     name: tokenName,
     symbol: tokenSymbol,
-    amount: targetSol, // Use target amount for token creation
+    amount: targetSol,
     creator: fundWallet.publicKey.toBase58(),
-    gasFee: launchFee, // Hypothetical field; adjust per real API
+    gasFee: launchFee,
   }).catch(() => ({
     data: { tokenAddress: "mock_token_address" },
   }));
