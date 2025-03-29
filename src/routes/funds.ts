@@ -51,13 +51,25 @@ router.post("/", asyncHandler(async (req, res) => {
   });
 }));
 
-// Get all funds
+// Get funds with optional status filter
 router.get("/", asyncHandler(async (req, res) => {
-  const funds = await Fund.find().populate("userId", "walletAddress");
+  const { status } = req.query;
+
+  // Validate status query parameter
+  if (status && !["active", "completed"].includes(status as string)) {
+    return res.status(400).json({ error: "Invalid status parameter. Must be 'active' or 'completed'." });
+  }
+
+  // Build query based on status
+  const query = status ? { status } : {};
+  const funds = await Fund.find(query).populate("userId", "walletAddress");
+
+  // Update currentDonatedSol for each fund
   for (const fund of funds) {
     fund.currentDonatedSol = await getBalance(new PublicKey(fund.fundWalletAddress));
     await fund.save();
   }
+
   res.json(funds);
 }));
 
