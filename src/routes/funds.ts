@@ -2,14 +2,13 @@ import express from "express";
 import mongoose from "mongoose";
 import User from "../models/User";
 import Fund from "../models/Fund";
-import { generateWallet, getBalance, transferSol } from "../utils/solana";
+import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
 import { createAndLaunchToken } from "../utils/pumpfun";
 import { PublicKey, Keypair } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
+import { getConfig } from "../config";
 
 const router = express.Router();
-
-const CROWD_FUND_CREATION_FEE = parseFloat(process.env.CROWD_FUND_CREATION_FEE || "0.1");
 
 const targetSolMap: { [key: number]: number } = {
   5: 1.480938417,
@@ -20,14 +19,38 @@ const targetSolMap: { [key: number]: number } = {
 };
 
 router.get("/fee", asyncHandler(async (req, res) => {
-  res.json({ fee: CROWD_FUND_CREATION_FEE });
+  const config = getConfig();
+
+  console.log(`GET /funds/fee - Request from ${req.ip} at ${new Date().toISOString()} - Returning fee values:`, {
+    creationFee: config.CROWD_FUND_CREATION_FEE,
+    minDonation: config.MIN_DONATION,
+    maxDonation: config.MAX_DONATION,
+  });
+
+  res.json({
+    creationFee: config.CROWD_FUND_CREATION_FEE,
+    minDonation: config.MIN_DONATION,
+    maxDonation: config.MAX_DONATION,
+  });
 }));
 
 router.post("/", asyncHandler(async (req, res) => {
-  const { userWallet, name, image, tokenName, tokenSymbol, tokenDescription, targetPercentage, targetWallet, tokenTwitter, tokenTelegram, tokenWebsite } = req.body;
+  const { userWallet, name, image, tokenName, tokenSymbol, tokenDescription, targetPercentage, targetWallet, tokenTwitter, tokenTelegram, tokenWebsite, txSignature } = req.body;
 
-  if (!userWallet || !name || !tokenName || !tokenSymbol || !tokenDescription || !targetPercentage || !targetWallet) {
+  const config = getConfig();
+
+  if (!userWallet || !name || !tokenName || !tokenSymbol || !tokenDescription || !targetPercentage || !targetWallet || !txSignature) {
     return res.status(400).json({ error: "Required fields are missing" });
+  }
+
+  const paymentValid = await verifySolPayment(
+    txSignature,
+    userWallet,
+    config.WEBSITE_WALLET,
+    config.CROWD_FUND_CREATION_FEE
+  );
+  if (!paymentValid) {
+    return res.status(400).json({ error: `Transaction does not contain valid SOL transfer of ${config.CROWD_FUND_CREATION_FEE} SOL from ${userWallet} to ${config.WEBSITE_WALLET}` });
   }
 
   let user = await User.findOne({ walletAddress: userWallet });
@@ -52,15 +75,15 @@ router.post("/", asyncHandler(async (req, res) => {
     tokenTwitter,
     tokenTelegram,
     tokenWebsite,
-    launchFee: CROWD_FUND_CREATION_FEE,
-    initialFeePaid: 0,
+    launchFee: config.CROWD_FUND_CREATION_FEE,
+    initialFeePaid: config.CROWD_FUND_CREATION_FEE,
   });
 
   await fund.save();
 
   res.status(201).json({
     ...fund.toJSON(),
-    message: `Please send ${CROWD_FUND_CREATION_FEE} SOL to ${fundWallet.publicKey.toBase58()} to activate the campaign`,
+    message: `Fund created successfully. Transaction signature: ${txSignature}`,
   });
 }));
 
@@ -74,7 +97,6 @@ router.get("/", asyncHandler(async (req, res) => {
   const query = status ? { status } : {};
   const funds = await Fund.find(query).populate("userId", "walletAddress");
 
-  // No longer update currentDonatedSol here; just fetch the existing value
   for (const fund of funds) {
     console.log(`GET /funds - Fund ${fund._id}: currentDonatedSol=${fund.currentDonatedSol}, initialFeePaid=${fund.initialFeePaid}`);
   }
@@ -84,14 +106,30 @@ router.get("/", asyncHandler(async (req, res) => {
 
 router.post("/:id/donate", asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { amount, donorWallet } = req.body as { amount: number; donorWallet: string };
+  const { amount, donorWallet, txSignature } = req.body as { amount: number; donorWallet: string; txSignature: string };
 
-  if (!donorWallet) {
-    return res.status(400).json({ error: "Donor wallet address is required" });
+  const config = getConfig();
+
+  if (!donorWallet || !txSignature) {
+    return res.status(400).json({ error: "Donor wallet address and transaction signature are required" });
+  }
+
+  if (amount < config.MIN_DONATION || amount > config.MAX_DONATION) {
+    return res.status(400).json({ error: `Donation amount must be between ${config.MIN_DONATION} and ${config.MAX_DONATION} SOL` });
   }
 
   const fund = await Fund.findById(id);
   if (!fund || fund.status === "completed") return res.status(400).json({ error: "Invalid fund" });
+
+  const paymentValid = await verifySolPayment(
+    txSignature,
+    donorWallet,
+    fund.fundWalletAddress,
+    amount
+  );
+  if (!paymentValid) {
+    return res.status(400).json({ error: `Transaction does not contain valid SOL transfer of ${amount} SOL from ${donorWallet} to ${fund.fundWalletAddress}` });
+  }
 
   const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
   if (fund.initialFeePaid === 0) {
@@ -99,8 +137,6 @@ router.post("/:id/donate", asyncHandler(async (req, res) => {
     console.log(`POST /funds/${id}/donate - Fund ${id}: Set initialFeePaid=${fund.initialFeePaid}`);
   }
 
-  // Update currentDonatedSol based on the balance, excluding initialFeePaid
-  const previousDonatedSol = fund.currentDonatedSol || 0;
   fund.currentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
   console.log(`POST /funds/${id}/donate - Fund ${id}: balance=${balance}, initialFeePaid=${fund.initialFeePaid}, currentDonatedSol=${fund.currentDonatedSol}`);
 
@@ -123,7 +159,7 @@ router.post("/:id/donate", asyncHandler(async (req, res) => {
 
     const excessSol = fund.currentDonatedSol - totalTarget;
     if (excessSol > 0) {
-      const websiteWallet = new PublicKey(process.env.WEBSITE_WALLET!);
+      const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
       await transferSol(fundWallet, websiteWallet, excessSol);
       console.log(`Transferred ${excessSol} SOL excess to WEBSITE_WALLET`);
     }
@@ -142,7 +178,7 @@ router.post("/:id/donate", asyncHandler(async (req, res) => {
   }
 
   await fund.save();
-  res.json(fund);
+  res.json({ ...fund.toJSON(), signature: txSignature });
 }));
 
 router.get("/users/leaderboard", asyncHandler(async (req, res) => {

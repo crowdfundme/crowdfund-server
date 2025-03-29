@@ -2,10 +2,28 @@ import express from "express";
 import mongoose from "mongoose";
 import dotenv from "dotenv";
 import fundRoutes from "./routes/funds";
-import userRoutes from "./routes/users"; // Add this
+import userRoutes from "./routes/users";
 import cors from "cors";
+import { getConfig } from "./config";
 
-dotenv.config();
+// Load environment variables
+// In development, load .env; in production, load .env.production or rely on system environment variables
+const env = process.env.NODE_ENV || "development";
+dotenv.config({ path: env === "production" ? ".env.production" : ".env" });
+
+// Load configuration
+const config = getConfig();
+
+// Log the loaded configuration for debugging
+console.log("Loaded configuration in index.ts:", {
+  CROWD_FUND_CREATION_FEE: config.CROWD_FUND_CREATION_FEE,
+  MIN_DONATION: config.MIN_DONATION,
+  MAX_DONATION: config.MAX_DONATION,
+  WEBSITE_WALLET: config.WEBSITE_WALLET,
+  MONGO_URI: config.MONGO_URI,
+  PORT: config.PORT,
+  SOLANA_NETWORK: config.SOLANA_NETWORK,
+});
 
 const app = express();
 
@@ -17,13 +35,13 @@ app.use(cors({
 
 app.use(express.json());
 
-mongoose.connect(process.env.MONGO_URI!, {
+// Connect to MongoDB using the config
+mongoose.connect(config.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
 } as any).then(() => console.log("MongoDB connected")).catch(err => console.error("MongoDB connection error:", err));
 
 app.use("/api/funds", fundRoutes);
-app.use("/api/users", userRoutes); // Add this
+app.use("/api/users", userRoutes);
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT}`));
