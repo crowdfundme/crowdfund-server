@@ -52,7 +52,7 @@ router.get(
   asyncHandler(async (req, res) => {
     const users = await User.find()
       .sort({ totalDonatedSol: -1 })
-      .limit(100) // Changed from 10 to 100
+      .limit(100)
       .select("walletAddress totalDonatedSol");
 
     const leaderboard: TotalDonatedUser[] = users.map((user) => ({
@@ -75,13 +75,13 @@ router.get(
       return res.status(404).json({ error: "Fund not found" });
     }
 
-    const users = await User.find({ "donations.fundId": fundId })
+    const users = (await User.find({ "donations.fundId": fundId })
       .sort({ "donations.amount": -1 })
-      .limit(100) // Changed from 10 to 100
+      .limit(100)
       .populate({
         path: "donations.fundId",
         select: "name tokenSymbol",
-      }) as UserWithDonations[];
+      })) as UserWithDonations[];
 
     const leaderboard = users
       .map((user) => {
@@ -93,7 +93,7 @@ router.get(
         };
       })
       .sort((a, b) => b.totalForFund - a.totalForFund)
-      .slice(0, 100); // Ensure top 100 after sorting
+      .slice(0, 100);
 
     res.status(200).json({
       fundName: fund.name,
@@ -108,10 +108,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const { walletAddress } = req.params;
 
-    const user = await User.findOne({ walletAddress }).populate({
+    const user = (await User.findOne({ walletAddress }).populate({
       path: "donations.fundId",
       select: "name tokenSymbol",
-    }) as UserWithDonations | null;
+    })) as UserWithDonations | null;
 
     if (!user) {
       return res.status(404).json({ error: "User not found" });
@@ -133,6 +133,61 @@ router.get(
     };
 
     res.status(200).json(profile);
+  })
+);
+
+// Update user profile
+router.put(
+  "/update/:walletAddress",
+  asyncHandler(async (req, res) => {
+    const { walletAddress } = req.params;
+    const { name, email } = req.body;
+
+    // Validate input
+    if (!walletAddress) {
+      return res.status(400).json({ error: "Wallet address is required" });
+    }
+
+    // Sanitize and validate inputs
+    const updates: { name?: string; email?: string } = {};
+    if (name !== undefined) {
+      if (typeof name !== "string" || name.trim().length === 0) {
+        return res.status(400).json({ error: "Name must be a non-empty string" });
+      }
+      updates.name = name.trim();
+    }
+    if (email !== undefined) {
+      if (typeof email !== "string" || !email.includes("@") || email.trim().length === 0) {
+        return res.status(400).json({ error: "Email must be a valid, non-empty string" });
+      }
+      updates.email = email.trim();
+    }
+
+    // Find and update user
+    const user = await User.findOneAndUpdate(
+      { walletAddress },
+      { $set: updates },
+      { new: true, runValidators: true } // Return updated doc, run schema validators
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Return updated profile (without populating donations for simplicity)
+    const updatedProfile = {
+      walletAddress: user.walletAddress,
+      name: user.name || null,
+      email: user.email || null,
+      totalDonatedSol: user.totalDonatedSol,
+      donations: user.donations.map((donation: any) => ({
+        fundId: donation.fundId, // Raw ObjectId, not populated
+        amount: donation.amount,
+        donatedAt: donation.donatedAt.toISOString(),
+      })),
+    };
+
+    res.status(200).json(updatedProfile);
   })
 );
 
