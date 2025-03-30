@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 import User from "../models/User";
 import Fund from "../models/Fund";
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
-import { createAndLaunchToken } from "../utils/pumpfun";
+import { createAndLaunchToken, createAndLaunchTokenWithApi } from "../utils/pumpfun";
 import { PublicKey, Keypair } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
@@ -146,6 +146,7 @@ router.post(
     const { amount, donorWallet, txSignature } = req.body as { amount: number; donorWallet: string; txSignature: string };
 
     const config = getConfig();
+    const GAS_FEE_RESERVE = 0.001; // Reserve for initial transfer fee
 
     if (!donorWallet || !txSignature) {
       return res.status(400).json({ error: "Donor wallet address and transaction signature are required" });
@@ -195,26 +196,28 @@ router.post(
     if (fund.currentDonatedSol >= totalTarget) {
       const fundWallet = Keypair.fromSecretKey(Buffer.from(fund.fundPrivateKey.split(","), "utf8"));
 
-      // Calculate excess SOL, ensuring initialFeePaid (0.1 SOL) is reserved in fundWallet
-      const requiredAmount = totalTarget + fund.initialFeePaid; // Amount to keep in fundWallet
-      const excessSol = Math.max(0, fund.currentDonatedSol - requiredAmount); // Excess beyond target + fee
-      if (excessSol > 0) {
-        const roundedExcessSol = Math.round(excessSol * 1_000_000_000) / 1_000_000_000; // Round to 9 decimals
-        const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
-        await transferSol(fundWallet, websiteWallet, roundedExcessSol);
-        console.log(`Transferred ${roundedExcessSol} SOL excess to WEBSITE_WALLET`);
+      // Transfer all SOL minus gas fee reserve to Pump.fun wallet
+      const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - GAS_FEE_RESERVE;
+      if (totalSolToTransfer <= 0) {
+        throw new Error(`Insufficient funds after reserving gas: ${totalSolToTransfer} SOL`);
       }
 
-      const tokenAddress = await createAndLaunchToken(
+      const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithApi(
         fundWallet,
         fund.tokenName,
         fund.tokenSymbol,
         fund.targetSolAmount,
         new PublicKey(fund.targetWallet),
         fund.initialFeePaid,
-        fund.targetPercentage
+        fund.targetPercentage,
+        fund.image,
+        totalSolToTransfer
       );
+
       fund.tokenAddress = tokenAddress;
+      fund.pumpPortalApiKey = apiKey;
+      fund.pumpPortalWalletPublicKey = walletPublicKey;
+      fund.pumpPortalPrivateKey = privateKey;
       fund.status = "completed";
       fund.completedAt = new Date();
     }

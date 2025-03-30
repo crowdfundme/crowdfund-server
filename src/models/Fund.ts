@@ -7,7 +7,7 @@ const FundSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     name: { type: String, required: true },
-    image: { type: String },
+    image: { type: String }, // Cloudinary URL for the token image
     fundWalletAddress: { type: String, required: true },
     fundPrivateKey: { type: String, required: true }, // Encrypt in production
     tokenName: { type: String, required: true },
@@ -15,8 +15,8 @@ const FundSchema = new Schema(
     tokenDescription: { type: String, required: true },
     targetPercentage: { type: Number, required: true },
     targetSolAmount: { type: Number, required: true },
-    currentDonatedSol: { type: Number, default: 0 }, // Only donations from other users
-    initialFeePaid: { type: Number, default: 0 }, // Tracks the creation fee
+    currentDonatedSol: { type: Number, default: 0 },
+    initialFeePaid: { type: Number, default: 0 },
     targetWallet: { type: String, required: true },
     tokenTwitter: { type: String, required: false },
     tokenTelegram: { type: String, required: false },
@@ -25,6 +25,9 @@ const FundSchema = new Schema(
     launchFee: { type: Number, default: CROWD_FUND_CREATION_FEE },
     tokenAddress: { type: String },
     completedAt: { type: Date },
+    pumpPortalApiKey: { type: String }, // Store PumpPortal API key
+    pumpPortalWalletPublicKey: { type: String }, // Store PumpPortal wallet public key
+    pumpPortalPrivateKey: { type: String }, // Store PumpPortal private key
   },
   { timestamps: true }
 );
