@@ -195,11 +195,14 @@ router.post(
     if (fund.currentDonatedSol >= totalTarget) {
       const fundWallet = Keypair.fromSecretKey(Buffer.from(fund.fundPrivateKey.split(","), "utf8"));
 
-      const excessSol = fund.currentDonatedSol - totalTarget;
+      // Calculate excess SOL, ensuring initialFeePaid (0.1 SOL) is reserved in fundWallet
+      const requiredAmount = totalTarget + fund.initialFeePaid; // Amount to keep in fundWallet
+      const excessSol = Math.max(0, fund.currentDonatedSol - requiredAmount); // Excess beyond target + fee
       if (excessSol > 0) {
+        const roundedExcessSol = Math.round(excessSol * 1_000_000_000) / 1_000_000_000; // Round to 9 decimals
         const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
-        await transferSol(fundWallet, websiteWallet, excessSol);
-        console.log(`Transferred ${excessSol} SOL excess to WEBSITE_WALLET`);
+        await transferSol(fundWallet, websiteWallet, roundedExcessSol);
+        console.log(`Transferred ${roundedExcessSol} SOL excess to WEBSITE_WALLET`);
       }
 
       const tokenAddress = await createAndLaunchToken(
@@ -207,7 +210,9 @@ router.post(
         fund.tokenName,
         fund.tokenSymbol,
         fund.targetSolAmount,
-        new PublicKey(fund.targetWallet)
+        new PublicKey(fund.targetWallet),
+        fund.initialFeePaid,
+        fund.targetPercentage
       );
       fund.tokenAddress = tokenAddress;
       fund.status = "completed";

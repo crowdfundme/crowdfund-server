@@ -1,73 +1,81 @@
 import { Keypair, PublicKey } from "@solana/web3.js";
-import { transferSol, getConnection } from "./solana"; // Update to import getConnection
+import { transferSol, getConnection } from "./solana";
 import { createMint, mintTo, getOrCreateAssociatedTokenAccount, transfer } from "@solana/spl-token";
 
-// Mock function to simulate token creation and launch on Pump.fun
 export const createAndLaunchToken = async (
   fundWallet: Keypair,
   tokenName: string,
   tokenSymbol: string,
   targetSol: number,
-  targetWallet: PublicKey
+  targetWallet: PublicKey,
+  initialFeePaid: number,
+  targetPercentage: number
 ): Promise<string> => {
-  const connection = getConnection(); // Use getConnection() to get the connection
-  const launchFee = 0.1; // This should be the initialFeePaid, but for mock purposes, we'll use 0.1
+  const connection = getConnection();
+  const launchFee = initialFeePaid;
 
   console.log(`Using ${launchFee} SOL from campaign wallet as gas fee`);
-  console.log(`Creating token with ${targetSol} SOL for ${tokenName} (${tokenSymbol})`);
+  console.log(`Creating token with ${targetSol} SOL for ${tokenName} (${tokenSymbol}) at ${targetPercentage}% target`);
 
-  // Step 1: Simulate transferring the target SOL amount to the target wallet
-  // In a real Pump.fun integration, this SOL would be used to fund the bonding curve
-  await transferSol(fundWallet, targetWallet, targetSol);
+  try {
+    const balance = await connection.getBalance(fundWallet.publicKey) / 1_000_000_000;
+    const requiredSol = targetSol + 0.01; // Buffer for fees
+    if (balance < requiredSol) {
+      throw new Error(`Insufficient funds in fundWallet: ${balance} SOL, required: ${requiredSol} SOL`);
+    }
 
-  // Step 2: Create a new SPL token mint (simulating token creation)
-  const mint = await createMint(
-    connection,
-    fundWallet, // Payer of the transaction fees
-    fundWallet.publicKey, // Mint authority
-    null, // Freeze authority (null means no freeze authority)
-    9 // Decimals (standard for most tokens)
-  );
+    await transferSol(fundWallet, targetWallet, targetSol);
 
-  // Step 3: Create associated token accounts for the fund wallet and target wallet
-  const fundWalletTokenAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    fundWallet,
-    mint,
-    fundWallet.publicKey
-  );
+    const mint = await createMint(
+      connection,
+      fundWallet,
+      fundWallet.publicKey,
+      null,
+      9
+    );
 
-  const targetWalletTokenAccount = await getOrCreateAssociatedTokenAccount(
-    connection,
-    fundWallet,
-    mint,
-    targetWallet
-  );
+    const fundWalletTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      fundWallet,
+      mint,
+      fundWallet.publicKey
+    );
 
-  // Step 4: Mint the initial token supply to the fund wallet
-  const totalSupply = 1_000_000_000 * 10 ** 9; // 1 billion tokens (with 9 decimals)
-  await mintTo(
-    connection,
-    fundWallet, // Payer of the transaction fees
-    mint,
-    fundWalletTokenAccount.address,
-    fundWallet.publicKey, // Mint authority
-    totalSupply
-  );
+    const targetWalletTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      fundWallet,
+      mint,
+      targetWallet
+    );
 
-  // Step 5: Transfer 25% of the token supply to the target wallet
-  const amountToTransfer = totalSupply * 0.25; // 25% of the total supply
-  await transfer(
-    connection,
-    fundWallet, // Payer of the transaction fees
-    fundWalletTokenAccount.address, // Source token account
-    targetWalletTokenAccount.address, // Destination token account
-    fundWallet.publicKey, // Owner of the source account
-    amountToTransfer
-  );
+    const totalSupply = 1_000_000_000 * 10 ** 9; // 1 billion tokens
+    await mintTo(
+      connection,
+      fundWallet,
+      mint,
+      fundWalletTokenAccount.address,
+      fundWallet.publicKey,
+      totalSupply
+    );
 
-  console.log(`Token ${mint.toBase58()} launched, transferred 25% (${amountToTransfer / 10 ** 9} tokens) to ${targetWallet.toBase58()}`);
+    const amountToTransfer = totalSupply * (targetPercentage / 100);
+    await transfer(
+      connection,
+      fundWallet,
+      fundWalletTokenAccount.address,
+      targetWalletTokenAccount.address,
+      fundWallet.publicKey,
+      amountToTransfer
+    );
 
-  // Return the token mint address
-  return mint.toBase58();
+    console.log(
+      `Token ${mint.toBase58()} launched, transferred ${targetPercentage}% (${
+        amountToTransfer / 10 ** 9
+      } tokens) to ${targetWallet.toBase58()}`
+    );
+    return mint.toBase58();
+  } catch (error) {
+    console.error("Failed to create and launch token:", error);
+    throw error;
+  }
 };

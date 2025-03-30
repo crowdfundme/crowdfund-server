@@ -1,9 +1,8 @@
 import { Connection, PublicKey, Transaction, Keypair, SystemProgram } from "@solana/web3.js";
 import { getConfig } from "../config";
 
-// Function to get the connection (created at runtime, not module initialization)
 export const getConnection = () => {
-  const config = getConfig(); // Load config at runtime
+  const config = getConfig();
   return new Connection(
     config.SOLANA_NETWORK === "mainnet" ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com",
     "confirmed"
@@ -27,11 +26,12 @@ export const getBalance = async (publicKey: PublicKey): Promise<number> => {
 
 export const transferSol = async (from: Keypair, to: PublicKey, amount: number) => {
   const connection = getConnection();
+  const lamports = Math.round(amount * 1_000_000_000); // Round to ensure integer lamports
   const transaction = new Transaction().add(
     SystemProgram.transfer({
       fromPubkey: from.publicKey,
       toPubkey: to,
-      lamports: amount * 1_000_000_000, // Convert SOL to lamports
+      lamports: BigInt(lamports), // Explicitly convert to BigInt
     })
   );
 
@@ -44,7 +44,6 @@ export const transferSol = async (from: Keypair, to: PublicKey, amount: number) 
   return signature;
 };
 
-// Verify SOL payment
 export const verifySolPayment = async (
   txSignature: string,
   senderWallet: string,
@@ -72,7 +71,7 @@ export const verifySolPayment = async (
         ix.parsed?.type === "transfer" &&
         ix.parsed.info.source === senderWallet &&
         ix.parsed.info.destination === receiverWallet &&
-        ix.parsed.info.lamports === requiredAmount * 1_000_000_000
+        ix.parsed.info.lamports === Math.round(requiredAmount * 1_000_000_000) // Match rounded lamports
     );
 
     if (!transferInstruction) {
