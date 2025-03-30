@@ -4,9 +4,10 @@
   "description": "",
   "main": "dist/index.js",
   "scripts": {
+    "clean": "rimraf dist",
     "start": "ts-node src/index.ts",
     "build": "tsc",
-    "serve": "node dist/index.js"
+    "serve": "node --require ./dist/env.js dist/index.js"
   },
   "keywords": [],
   "author": "",
@@ -18,15 +19,19 @@
     "@types/bs58": "^4.0.4",
     "axios": "^1.8.4",
     "bs58": "^6.0.0",
+    "cloudinary": "^2.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "mongoose": "^8.13.1"
+    "mongoose": "^8.13.1",
+    "multer": "1.4.5-lts.2"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.1",
+    "@types/multer": "^1.4.12",
     "@types/node": "^22.13.14",
+    "rimraf": "^6.0.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.8.2"
   }

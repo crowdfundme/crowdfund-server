@@ -1,15 +1,12 @@
+// src/index.ts
 import express from "express";
 import mongoose from "mongoose";
-import dotenv from "dotenv";
 import fundRoutes from "./routes/funds";
 import userRoutes from "./routes/users";
+import tokenImageRoutes from "./routes/tokenImageRoutes";
 import cors from "cors";
 import { getConfig } from "./config";
-
-// Load environment variables
-// In development, load .env; in production, load .env.production or rely on system environment variables
-const env = process.env.NODE_ENV || "development";
-dotenv.config({ path: env === "production" ? ".env.production" : ".env" });
+import "./env"; // Ensure env.ts runs first
 
 // Load configuration
 const config = getConfig();
@@ -23,6 +20,9 @@ console.log("Loaded configuration in index.ts:", {
   MONGO_URI: config.MONGO_URI,
   PORT: config.PORT,
   SOLANA_NETWORK: config.SOLANA_NETWORK,
+  CLOUDINARY_CLOUD_NAME: config.CLOUDINARY_CLOUD_NAME,
+  CLOUDINARY_API_KEY: config.CLOUDINARY_API_KEY,
+  CLOUDINARY_API_SECRET: config.CLOUDINARY_API_SECRET ? "[hidden]" : undefined,
 });
 
 const app = express();
@@ -41,7 +41,9 @@ mongoose.connect(config.MONGO_URI, {
   useUnifiedTopology: true,
 } as any).then(() => console.log("MongoDB connected")).catch(err => console.error("MongoDB connection error:", err));
 
+// Routes
 app.use("/api/funds", fundRoutes);
 app.use("/api/users", userRoutes);
+app.use("/api/token-images", tokenImageRoutes);
 
 app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT}`));
