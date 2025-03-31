@@ -4,6 +4,7 @@ import { createMint, mintTo, getOrCreateAssociatedTokenAccount, transfer } from 
 import { VersionedTransaction, Connection } from "@solana/web3.js";
 import bs58 from "bs58";
 import { getConfig } from "../config";
+import Fund from "../models/Fund"; // Import Fund model for DB updates
 
 // Simulated token creation (original method for testing)
 export const createAndLaunchToken = async (
@@ -30,7 +31,7 @@ export const createAndLaunchToken = async (
 
     await transferSol(fundWallet, targetWallet, targetSol);
 
-    const mint = await createMint(connection, fundWallet, fundWallet.publicKey, null, 9);
+    const mint = await createMint(connection, fundWallet, fundWallet.publicKey, null, 6);
     const fundWalletTokenAccount = await getOrCreateAssociatedTokenAccount(
       connection,
       fundWallet,
@@ -44,7 +45,7 @@ export const createAndLaunchToken = async (
       targetWallet
     );
 
-    const totalSupply = 1_000_000_000 * 10 ** 9;
+    const totalSupply = 1_000_000_000 * 10 ** 6;
     await mintTo(connection, fundWallet, mint, fundWalletTokenAccount.address, fundWallet.publicKey, totalSupply);
 
     const amountToTransfer = totalSupply * (targetPercentage / 100);
@@ -59,7 +60,7 @@ export const createAndLaunchToken = async (
 
     console.log(
       `Token ${mint.toBase58()} launched, transferred ${targetPercentage}% (${
-        amountToTransfer / 10 ** 9
+        amountToTransfer / 10 ** 6
       } tokens) to ${targetWallet.toBase58()}`
     );
     return mint.toBase58();
@@ -79,12 +80,14 @@ export const createAndLaunchTokenWithApi = async (
   initialFeePaid: number,
   targetPercentage: number,
   imageUrl: string,
-  totalSolToTransfer: number // Total SOL to transfer (initialFeePaid + currentDonatedSol - gas reserve)
+  totalSolToTransfer: number,
+  fundId: string // Add fundId parameter to identify the fund in the DB
 ): Promise<{ tokenAddress: string; apiKey: string; walletPublicKey: string; privateKey: string }> => {
   const connection = getConnection();
   const RPC_ENDPOINT = process.env.SOLANA_RPC_ENDPOINT || "https://api.devnet.solana.com";
   const web3Connection = new Connection(RPC_ENDPOINT, "confirmed");
-  const GAS_FEE_RESERVE = 0.001; // Reserve for Pump.fun wallet gas fees
+  const GAS_FEE = 0.005;
+  const MIN_EXCESS_THRESHOLD = 0.005;
   const config = getConfig();
 
   try {
@@ -98,7 +101,15 @@ export const createAndLaunchTokenWithApi = async (
 
     const pumpWalletKeypair = Keypair.fromSecretKey(bs58.decode(privateKey));
 
-    // Step 2: Fetch image from Cloudinary and convert to Blob
+    // Step 2: Save PumpPortal wallet details to the Fund document
+    const fund = await Fund.findById(fundId);
+    if (!fund) throw new Error(`Fund with ID ${fundId} not found`);
+    fund.pumpPortalWalletPublicKey = walletPublicKey;
+    fund.pumpPortalPrivateKey = privateKey; // Note: In production, encrypt this!
+    await fund.save();
+    console.log(`Saved PumpPortal wallet details to fund ${fundId}: publicKey=${walletPublicKey}`);
+
+    // Step 3: Fetch image from Cloudinary and convert to Blob
     let fullImageUrl = imageUrl;
     if (!imageUrl.startsWith("http")) {
       fullImageUrl = `https://res.cloudinary.com/${config.CLOUDINARY_CLOUD_NAME}/image/upload/${imageUrl}`;
@@ -108,13 +119,13 @@ export const createAndLaunchTokenWithApi = async (
     if (!imageResponse.ok) throw new Error(`Failed to fetch image from Cloudinary: ${imageResponse.statusText}`);
     const imageBlob = await imageResponse.blob();
 
-    // Step 3: Create token metadata with Cloudinary image (dynamic filename)
+    // Step 4: Create token metadata with Cloudinary image
     const formData = new FormData();
     formData.append("file", imageBlob, `${tokenName.toLowerCase().replace(/\s+/g, "-")}-image.png`);
     formData.append("name", tokenName);
     formData.append("symbol", tokenSymbol);
     formData.append("description", `Crowdfunded token: ${tokenName}`);
-    formData.append("twitter", "https://twitter.com/example"); // Placeholder
+    formData.append("twitter", "https://twitter.com/example");
     formData.append("telegram", "https://t.me/example");
     formData.append("website", "https://example.com");
     formData.append("showName", "true");
@@ -126,12 +137,13 @@ export const createAndLaunchTokenWithApi = async (
     if (!metadataResponse.ok) throw new Error("Failed to upload metadata to IPFS");
     const metadataResponseJSON = await metadataResponse.json();
 
-    // Step 4: Transfer SOL to Pump.fun wallet and confirm
+    // Step 5: Transfer SOL to Pump.fun wallet and confirm
     const transferSignature = await transferSol(fundWallet, pumpWalletKeypair.publicKey, totalSolToTransfer);
     await web3Connection.confirmTransaction(transferSignature, "confirmed");
     console.log(`SOL transfer confirmed: ${transferSignature}`);
 
-    // Step 5: Create token via PumpPortal trade-local API with fresh blockhash
+    // Step 6: Create token and buy initial tokens
+    const solForCreation = totalSolToTransfer - GAS_FEE;
     const mintKeypair = Keypair.generate();
     const createResponse = await fetch("https://pumpportal.fun/api/trade-local", {
       method: "POST",
@@ -146,7 +158,7 @@ export const createAndLaunchTokenWithApi = async (
         },
         mint: mintKeypair.publicKey.toBase58(),
         denominatedInSol: "true",
-        amount: targetSol,
+        amount: solForCreation,
         slippage: 10,
         priorityFee: 0.0005,
         pool: "pump",
@@ -157,35 +169,79 @@ export const createAndLaunchTokenWithApi = async (
       throw new Error(`Failed to create token: ${createResponse.statusText}`);
     }
 
-    // Log the raw response from /api/trade-local
     const rawResponseText = await createResponse.clone().text();
     console.log("Raw response from PumpPortal /api/trade-local:", rawResponseText);
 
     const txData = await createResponse.arrayBuffer();
     const tx = VersionedTransaction.deserialize(new Uint8Array(txData));
-
-    // Update the transaction message with a fresh blockhash
     const recentBlockhash = (await web3Connection.getLatestBlockhash("confirmed")).blockhash;
     tx.message.recentBlockhash = recentBlockhash;
-
-    // Sign and send the transaction
     tx.sign([mintKeypair, pumpWalletKeypair]);
     const signature = await web3Connection.sendTransaction(tx, { skipPreflight: true });
     console.log(`Token created: https://solscan.io/tx/${signature}`);
     console.log(`Token mint address: ${mintKeypair.publicKey.toBase58()}`);
 
-    // Step 6: Skip token transfer for now, log details for inspection
-    console.log(`Target wallet: ${targetWallet.toBase58()}`);
-    console.log(`Target percentage: ${targetPercentage}%`);
+    // Step 7: Transfer targetPercentage of total supply to targetWallet
+    const totalSupply = 1_000_000_000 * 10 ** 6;
+    const amountToTransfer = totalSupply * (targetPercentage / 100);
+    const pumpTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      pumpWalletKeypair,
+      mintKeypair.publicKey,
+      pumpWalletKeypair.publicKey
+    );
+    const targetTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      pumpWalletKeypair,
+      mintKeypair.publicKey,
+      targetWallet
+    );
 
-    // Step 7: Calculate and transfer excess SOL back to WEBSITE_WALLET
+    // Retry logic for token account balance
+    let boughtAmount;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccount.address, "confirmed");
+        break;
+      } catch (error) {
+        if (error instanceof Error && error.name === "TokenAccountNotFoundError" && attempt < 2) {
+          console.log(`Token account not found on attempt ${attempt + 1}, waiting 2 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (!boughtAmount) {
+      throw new Error("Failed to retrieve token account balance after retries");
+    }
+
+    console.log(`Tokens received in pump wallet: ${boughtAmount.value.uiAmount ?? "unknown"} tokens`);
+    const uiAmount = boughtAmount.value.uiAmount ?? 0;
+    if (uiAmount < amountToTransfer / 10 ** 6) {
+      console.warn(`Warning: Only ${uiAmount} tokens available, less than ${amountToTransfer / 10 ** 6} requested`);
+    }
+
+    const transferAmount = Math.min(amountToTransfer, Number(boughtAmount.value.amount));
+    await transfer(
+      connection,
+      pumpWalletKeypair,
+      pumpTokenAccount.address,
+      targetTokenAccount.address,
+      pumpWalletKeypair,
+      transferAmount
+    );
+    console.log(`Transferred ${transferAmount / 10 ** 6} tokens to ${targetWallet.toBase58()}`);
+
+    // Step 8: Calculate and transfer excess SOL back to WEBSITE_WALLET
     const pumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey) / 1_000_000_000;
-    const excessSol = Math.max(0, pumpWalletBalance - GAS_FEE_RESERVE);
-    if (excessSol > 0) {
-      const roundedExcessSol = Math.round(excessSol * 1_000_000_000) / 1_000_000_000;
+    if (pumpWalletBalance > MIN_EXCESS_THRESHOLD) {
       const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
-      await transferSol(pumpWalletKeypair, websiteWallet, roundedExcessSol);
-      console.log(`Transferred ${roundedExcessSol} SOL excess from Pump.fun wallet to WEBSITE_WALLET`);
+      await transferSol(pumpWalletKeypair, websiteWallet, pumpWalletBalance);
+      console.log(`Transferred ${pumpWalletBalance} SOL excess from Pump.fun wallet to WEBSITE_WALLET`);
+    } else {
+      console.log(`No meaningful excess SOL to transfer: ${pumpWalletBalance} SOL is below threshold of ${MIN_EXCESS_THRESHOLD} SOL`);
     }
 
     return {

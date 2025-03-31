@@ -1,5 +1,4 @@
 import express from "express";
-import mongoose from "mongoose";
 import User from "../models/User";
 import Fund from "../models/Fund";
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
@@ -7,16 +6,24 @@ import { createAndLaunchToken, createAndLaunchTokenWithApi } from "../utils/pump
 import { PublicKey, Keypair } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
+import { getOrCreateAssociatedTokenAccount, transfer, getAssociatedTokenAddress } from "@solana/spl-token";
+import bs58 from "bs58";
 
 const router = express.Router();
 
+// Define the type for targetSolMap explicitly
 const targetSolMap: { [key: number]: number } = {
+  1: 0.3,
   5: 1.480938417,
   10: 3.114080165,
   25: 9.204131229,
   50: 26.439790577,
   75: 70.356037153,
 };
+
+// Valid target percentages
+const validTargetPercentages = [1, 5, 10, 25, 50, 75] as const;
+type TargetPercentage = typeof validTargetPercentages[number];
 
 router.get(
   "/fee",
@@ -52,7 +59,6 @@ router.post(
       tokenTwitter,
       tokenTelegram,
       tokenWebsite,
-      txSignature,
     } = req.body;
 
     const config = getConfig();
@@ -64,23 +70,16 @@ router.post(
       !tokenSymbol ||
       !tokenDescription ||
       !targetPercentage ||
-      !targetWallet ||
-      !txSignature
+      !targetWallet
     ) {
       return res.status(400).json({ error: "Required fields are missing" });
     }
 
-    const paymentValid = await verifySolPayment(
-      txSignature,
-      userWallet,
-      config.WEBSITE_WALLET,
-      config.CROWD_FUND_CREATION_FEE
-    );
-    if (!paymentValid) {
-      return res.status(400).json({
-        error: `Transaction does not contain valid SOL transfer of ${config.CROWD_FUND_CREATION_FEE} SOL from ${userWallet} to ${config.WEBSITE_WALLET}`,
-      });
+    const parsedTargetPercentage = Number(targetPercentage);
+    if (!validTargetPercentages.includes(parsedTargetPercentage as TargetPercentage)) {
+      return res.status(400).json({ error: "Invalid targetPercentage. Must be one of: 1, 5, 10, 25, 50, 75" });
     }
+    const typedTargetPercentage = parsedTargetPercentage as TargetPercentage;
 
     let user = await User.findOne({ walletAddress: userWallet });
     if (!user) {
@@ -98,21 +97,63 @@ router.post(
       tokenName,
       tokenSymbol,
       tokenDescription,
-      targetPercentage,
-      targetSolAmount: targetSolMap[targetPercentage],
+      targetPercentage: typedTargetPercentage,
+      targetSolAmount: targetSolMap[typedTargetPercentage],
       targetWallet,
       tokenTwitter,
       tokenTelegram,
       tokenWebsite,
       launchFee: config.CROWD_FUND_CREATION_FEE,
-      initialFeePaid: config.CROWD_FUND_CREATION_FEE,
+      initialFeePaid: 0,
     });
 
     await fund.save();
 
     res.status(201).json({
       ...fund.toJSON(),
-      message: `Fund created successfully. Transaction signature: ${txSignature}`,
+      message: `Fund created. Please send ${config.CROWD_FUND_CREATION_FEE} SOL to ${fund.fundWalletAddress} to activate.`,
+    });
+  })
+);
+
+router.put(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { txSignature } = req.body;
+    const config = getConfig();
+
+    if (!txSignature) {
+      return res.status(400).json({ error: "Transaction signature is required" });
+    }
+
+    const fund = await Fund.findById(id).populate("userId", "walletAddress");
+    if (!fund) {
+      return res.status(404).json({ error: "Fund not found" });
+    }
+
+    if (fund.initialFeePaid > 0) {
+      return res.status(400).json({ error: "Creation fee already paid" });
+    }
+
+    const paymentValid = await verifySolPayment(
+      txSignature,
+      fund.userId.walletAddress,
+      fund.fundWalletAddress,
+      config.CROWD_FUND_CREATION_FEE
+    );
+    if (!paymentValid) {
+      return res.status(400).json({
+        error: `Transaction does not contain valid SOL transfer of ${config.CROWD_FUND_CREATION_FEE} SOL to ${fund.fundWalletAddress}`,
+      });
+    }
+
+    fund.initialFeePaid = config.CROWD_FUND_CREATION_FEE;
+    await fund.save();
+
+    res.status(200).json({
+      ...fund.toJSON(),
+      message: `Creation fee paid successfully. Transaction signature: ${txSignature}`,
     });
   })
 );
@@ -143,10 +184,10 @@ router.post(
   "/:id/donate",
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    const { amount, donorWallet, txSignature } = req.body as { amount: number; donorWallet: string; txSignature: string };
+    const { amount, donorWallet, txSignature } = req.body;
 
     const config = getConfig();
-    const GAS_FEE_RESERVE = 0.001; // Reserve for initial transfer fee
+    const GAS_FEE_RESERVE = 0.001;
 
     if (!donorWallet || !txSignature) {
       return res.status(400).json({ error: "Donor wallet address and transaction signature are required" });
@@ -159,7 +200,12 @@ router.post(
     }
 
     const fund = await Fund.findById(id);
-    if (!fund || fund.status === "completed") return res.status(400).json({ error: "Invalid fund" });
+    if (!fund || fund.status === "completed") {
+      return res.status(400).json({ error: "Invalid fund" });
+    }
+    if (fund.initialFeePaid === 0) {
+      return res.status(400).json({ error: "Creation fee not yet paid. Please pay the creation fee first." });
+    }
 
     const paymentValid = await verifySolPayment(txSignature, donorWallet, fund.fundWalletAddress, amount);
     if (!paymentValid) {
@@ -169,15 +215,7 @@ router.post(
     }
 
     const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
-    if (fund.initialFeePaid === 0) {
-      fund.initialFeePaid = fund.launchFee;
-      console.log(`POST /funds/${id}/donate - Fund ${id}: Set initialFeePaid=${fund.initialFeePaid}`);
-    }
-
     fund.currentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
-    console.log(
-      `POST /funds/${id}/donate - Fund ${id}: balance=${balance}, initialFeePaid=${fund.initialFeePaid}, currentDonatedSol=${fund.currentDonatedSol}`
-    );
 
     let donor = await User.findOne({ walletAddress: donorWallet });
     if (!donor) {
@@ -195,35 +233,149 @@ router.post(
     const totalTarget = fund.targetSolAmount;
     if (fund.currentDonatedSol >= totalTarget) {
       const fundWallet = Keypair.fromSecretKey(Buffer.from(fund.fundPrivateKey.split(","), "utf8"));
-
-      // Transfer all SOL minus gas fee reserve to Pump.fun wallet
       const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - GAS_FEE_RESERVE;
       if (totalSolToTransfer <= 0) {
         throw new Error(`Insufficient funds after reserving gas: ${totalSolToTransfer} SOL`);
       }
 
-      const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithApi(
-        fundWallet,
-        fund.tokenName,
-        fund.tokenSymbol,
-        fund.targetSolAmount,
-        new PublicKey(fund.targetWallet),
-        fund.initialFeePaid,
-        fund.targetPercentage,
-        fund.image,
-        totalSolToTransfer
-      );
-
-      fund.tokenAddress = tokenAddress;
-      fund.pumpPortalApiKey = apiKey;
-      fund.pumpPortalWalletPublicKey = walletPublicKey;
-      fund.pumpPortalPrivateKey = privateKey;
       fund.status = "completed";
       fund.completedAt = new Date();
+      await fund.save();
+      console.log(`Fund ${fund._id} marked as completed before token creation attempt`);
+
+      try {
+        const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithApi(
+          fundWallet,
+          fund.tokenName,
+          fund.tokenSymbol,
+          fund.targetSolAmount,
+          new PublicKey(fund.targetWallet),
+          fund.initialFeePaid,
+          fund.targetPercentage,
+          fund.image,
+          totalSolToTransfer,
+          fund._id.toString()
+        );
+
+        fund.tokenAddress = tokenAddress;
+        fund.pumpPortalApiKey = apiKey;
+        fund.pumpPortalWalletPublicKey = walletPublicKey;
+        fund.pumpPortalPrivateKey = privateKey;
+        console.log(`Token creation and transfer succeeded for fund ${fund._id}`);
+      } catch (error: unknown) {
+        console.error(`Token creation or transfer failed for fund ${fund._id}:`, error);
+        fund.launchError = error instanceof Error ? error.message : "Unknown error during token creation/transfer";
+      }
+
+      await fund.save();
+    } else {
+      await fund.save();
     }
 
-    await fund.save();
     res.json({ ...fund.toJSON(), signature: txSignature });
+  })
+);
+
+router.post(
+  "/:id/transfer",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { userWallet } = req.body;
+
+    if (!userWallet) {
+      return res.status(400).json({ error: "User wallet address is required" });
+    }
+
+    const fund = await Fund.findById(id).populate("userId", "walletAddress");
+    if (!fund) {
+      return res.status(404).json({ error: "Fund not found" });
+    }
+
+    if (fund.userId.walletAddress !== userWallet) {
+      return res.status(403).json({ error: "Only the fund creator can trigger this transfer" });
+    }
+
+    if (fund.status !== "completed" || !fund.tokenAddress) {
+      return res.status(400).json({ error: "Fund must be completed and have a token address to transfer" });
+    }
+
+    if (!fund.pumpPortalPrivateKey || !fund.pumpPortalWalletPublicKey) {
+      return res.status(400).json({ error: "Pump.fun wallet details are missing" });
+    }
+
+    const connection = getConnection();
+    const pumpWalletKeypair = Keypair.fromSecretKey(bs58.decode(fund.pumpPortalPrivateKey));
+    const tokenMint = new PublicKey(fund.tokenAddress);
+    const targetWallet = new PublicKey(fund.targetWallet);
+
+    const pumpTokenAccountAddress = await getAssociatedTokenAddress(tokenMint, pumpWalletKeypair.publicKey);
+    const targetTokenAccountAddress = await getAssociatedTokenAddress(tokenMint, targetWallet);
+
+    console.log(`Checking target wallet ATA: ${targetTokenAccountAddress.toBase58()}`);
+    let targetBalance;
+    try {
+      targetBalance = await connection.getTokenAccountBalance(targetTokenAccountAddress, "confirmed");
+      if (targetBalance.value.uiAmount !== null && targetBalance.value.uiAmount > 0) {
+        console.log(`Tokens already transferred to ${targetWallet.toBase58()}: ${targetBalance.value.uiAmount} tokens`);
+        fund.launchError = null;
+        await fund.save();
+        return res.json({
+          message: `Tokens already transferred to ${targetWallet.toBase58()}. Amount: ${targetBalance.value.uiAmount} tokens`,
+        });
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && (err.name === "TokenAccountNotFoundError" || (err.message.includes("could not find account")))) {
+        console.log(`No token account found for target wallet: ${targetWallet.toBase58()}`);
+      } else {
+        console.error(`Error checking target wallet balance:`, err);
+        throw err;
+      }
+    }
+
+    console.log(`Checking Pump.fun wallet ATA: ${pumpTokenAccountAddress.toBase58()}`);
+    let pumpBalance;
+    try {
+      pumpBalance = await connection.getTokenAccountBalance(pumpTokenAccountAddress, "confirmed");
+    } catch (err: unknown) {
+      if (err instanceof Error && (err.name === "TokenAccountNotFoundError" || err.message.includes("could not find account"))) {
+        console.log(`No token account found for Pump.fun wallet: ${pumpWalletKeypair.publicKey.toBase58()}`);
+        return res.status(400).json({
+          error: "No tokens found in Pump.fun wallet. They may have been transferred or never deposited.",
+        });
+      }
+      console.error(`Error checking Pump.fun wallet balance:`, err);
+      throw err;
+    }
+
+    if (!pumpBalance || (pumpBalance.value.uiAmount !== null && pumpBalance.value.uiAmount === 0)) {
+      return res.status(400).json({ error: "No tokens available in Pump.fun wallet to transfer" });
+    }
+
+    const targetTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      pumpWalletKeypair,
+      tokenMint,
+      targetWallet
+    );
+
+    const transferAmount = Number(pumpBalance.value.amount);
+    const signature = await transfer(
+      connection,
+      pumpWalletKeypair,
+      pumpTokenAccountAddress,
+      targetTokenAccount.address,
+      pumpWalletKeypair,
+      transferAmount
+    );
+
+    console.log(`Manually transferred ${transferAmount / 10 ** 6} tokens to ${targetWallet.toBase58()} for fund ${id}`);
+    fund.launchError = null;
+    await fund.save();
+
+    res.json({
+      message: `Successfully transferred ${transferAmount / 10 ** 6} tokens to ${targetWallet.toBase58()}`,
+      signature,
+    });
   })
 );
 

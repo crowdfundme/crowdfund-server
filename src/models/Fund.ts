@@ -24,10 +24,13 @@ const FundSchema = new Schema(
     status: { type: String, enum: ["active", "completed"], default: "active" },
     launchFee: { type: Number, default: CROWD_FUND_CREATION_FEE },
     tokenAddress: { type: String },
-    completedAt: { type: Date },
     pumpPortalApiKey: { type: String }, // Store PumpPortal API key
     pumpPortalWalletPublicKey: { type: String }, // Store PumpPortal wallet public key
     pumpPortalPrivateKey: { type: String }, // Store PumpPortal private key
+    completedAt: { type: Date },
+    launchError: { type: String },
+    tokenCa: { type: String },
+    solscanUrl: { type: String },
   },
   { timestamps: true }
 );
