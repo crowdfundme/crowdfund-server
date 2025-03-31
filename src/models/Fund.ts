@@ -27,6 +27,7 @@ const FundSchema = new Schema(
     pumpPortalApiKey: { type: String }, // Store PumpPortal API key
     pumpPortalWalletPublicKey: { type: String }, // Store PumpPortal wallet public key
     pumpPortalPrivateKey: { type: String }, // Store PumpPortal private key
+    pumpPortalTransferCompleted: { type: Boolean, default: false },
     completedAt: { type: Date },
     launchError: { type: String },
     tokenCa: { type: String },

@@ -12,6 +12,8 @@ interface Config {
   CLOUDINARY_CLOUD_NAME: string; // Added
   CLOUDINARY_API_KEY: string;    // Added
   CLOUDINARY_API_SECRET: string;  // Added
+  SOLANA_RPC_LIVE_ENDPOINT:string;
+  SOLANA_RPC_DEV_ENDPOINT:string;
 }
 
 // Function to load and validate configuration
@@ -28,6 +30,8 @@ export const getConfig = (): Config => {
     CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || "",
     CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || "",
     CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || "",
+    SOLANA_RPC_LIVE_ENDPOINT: process.env.SOLANA_RPC_LIVE_ENDPOINT || "",
+    SOLANA_RPC_DEV_ENDPOINT: process.env.SOLANA_RPC_DEV_ENDPOINT || "",
   };
 
   // Validate required environment variables
@@ -37,6 +41,8 @@ export const getConfig = (): Config => {
     "CLOUDINARY_CLOUD_NAME", // Added
     "CLOUDINARY_API_KEY",    // Added
     "CLOUDINARY_API_SECRET", // Added
+    "SOLANA_RPC_LIVE_ENDPOINT",
+    "SOLANA_RPC_DEV_ENDPOINT",
   ];
   for (const varName of requiredVars) {
     if (!config[varName as keyof Config]) {

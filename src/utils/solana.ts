@@ -1,10 +1,10 @@
-import { Connection, PublicKey, Transaction, Keypair, SystemProgram } from "@solana/web3.js";
+import { Connection, PublicKey, Transaction, Keypair, SystemProgram, Commitment } from "@solana/web3.js";
 import { getConfig } from "../config";
 
 export const getConnection = () => {
   const config = getConfig();
   return new Connection(
-    config.SOLANA_NETWORK === "mainnet" ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com",
+    config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT,
     "confirmed"
   );
 };
@@ -13,10 +13,10 @@ export const generateWallet = () => {
   return Keypair.generate();
 };
 
-export const getBalance = async (publicKey: PublicKey): Promise<number> => {
+export const getBalance = async (publicKey: PublicKey, commitment?: Commitment): Promise<number> => {
   const connection = getConnection();
   try {
-    const balance = await connection.getBalance(publicKey);
+    const balance = await connection.getBalance(publicKey, commitment);
     return balance / 1_000_000_000; // Convert lamports to SOL
   } catch (error) {
     console.error("Error fetching balance:", error);

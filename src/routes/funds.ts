@@ -2,7 +2,7 @@ import express from "express";
 import User from "../models/User";
 import Fund from "../models/Fund";
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
-import { createAndLaunchToken, createAndLaunchTokenWithApi } from "../utils/pumpfun";
+import { createAndLaunchToken, createAndLaunchTokenWithApi, createAndLaunchTokenWithLightning } from "../utils/pumpfun";
 import { PublicKey, Keypair } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
@@ -188,6 +188,7 @@ router.post(
 
     const config = getConfig();
     const GAS_FEE_RESERVE = 0.001;
+    const connection = getConnection();
 
     if (!donorWallet || !txSignature) {
       return res.status(400).json({ error: "Donor wallet address and transaction signature are required" });
@@ -207,6 +208,7 @@ router.post(
       return res.status(400).json({ error: "Creation fee not yet paid. Please pay the creation fee first." });
     }
 
+    // Verify and confirm the donation transaction
     const paymentValid = await verifySolPayment(txSignature, donorWallet, fund.fundWalletAddress, amount);
     if (!paymentValid) {
       return res.status(400).json({
@@ -214,14 +216,23 @@ router.post(
       });
     }
 
-    const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
-    fund.currentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
+    // Wait for transaction to be finalized
+    await connection.confirmTransaction(txSignature, "finalized");
+    console.log(`Donation transaction ${txSignature} confirmed for fund ${id}`);
 
+    // Fetch the updated balance once after confirmation
+    const balance = await getBalance(new PublicKey(fund.fundWalletAddress), "finalized");
+    const newCurrentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
+    console.log(`Fund ${id} balance after donation: ${balance} SOL, currentDonatedSol updated to ${newCurrentDonatedSol} SOL`);
+
+    // Update fund with the latest donation
+    fund.currentDonatedSol = newCurrentDonatedSol;
+
+    // Update donor info
     let donor = await User.findOne({ walletAddress: donorWallet });
     if (!donor) {
       donor = new User({ walletAddress: donorWallet });
     }
-
     donor.donations.push({
       fundId: fund._id,
       amount,
@@ -232,19 +243,30 @@ router.post(
 
     const totalTarget = fund.targetSolAmount;
     if (fund.currentDonatedSol >= totalTarget) {
+      // Mark as completed
+      fund.status = "completed";
+      fund.completedAt = new Date();
+      console.log(`Fund ${fund._id} reached target: ${fund.currentDonatedSol} SOL >= ${totalTarget} SOL`);
+
+      // Validate balance against expected amount
+      const expectedBalance = fund.initialFeePaid + fund.currentDonatedSol;
+      if (balance < expectedBalance - 0.001) { // Allow small tolerance for network fees
+        console.error(`Balance mismatch for fund ${id}: actual=${balance} SOL, expected=${expectedBalance} SOL`);
+        throw new Error(`Fund wallet balance (${balance} SOL) is less than expected (${expectedBalance} SOL)`);
+      }
+
       const fundWallet = Keypair.fromSecretKey(Buffer.from(fund.fundPrivateKey.split(","), "utf8"));
       const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - GAS_FEE_RESERVE;
       if (totalSolToTransfer <= 0) {
         throw new Error(`Insufficient funds after reserving gas: ${totalSolToTransfer} SOL`);
       }
 
-      fund.status = "completed";
-      fund.completedAt = new Date();
+      // Save fund state before token creation
       await fund.save();
-      console.log(`Fund ${fund._id} marked as completed before token creation attempt`);
+      console.log(`Fund ${fund._id} saved as completed before token creation`);
 
       try {
-        const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithApi(
+        const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithLightning(
           fundWallet,
           fund.tokenName,
           fund.tokenSymbol,
@@ -267,6 +289,7 @@ router.post(
         fund.launchError = error instanceof Error ? error.message : "Unknown error during token creation/transfer";
       }
 
+      // Final save with token details or error
       await fund.save();
     } else {
       await fund.save();
@@ -376,6 +399,75 @@ router.post(
       message: `Successfully transferred ${transferAmount / 10 ** 6} tokens to ${targetWallet.toBase58()}`,
       signature,
     });
+  })
+);
+
+router.post(
+  "/:id/launch",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { userWallet } = req.body;
+
+    if (!userWallet) {
+      return res.status(400).json({ error: "User wallet address is required" });
+    }
+
+    const fund = await Fund.findById(id).populate("userId", "walletAddress");
+    if (!fund) {
+      return res.status(404).json({ error: "Fund not found" });
+    }
+
+    if (fund.userId.walletAddress !== userWallet) {
+      return res.status(403).json({ error: "Only the fund creator can launch the token" });
+    }
+
+    if (fund.status !== "completed") {
+      return res.status(400).json({ error: "Fund must be completed to launch the token" });
+    }
+
+    if (fund.tokenAddress) {
+      return res.status(400).json({ error: "Token already launched" });
+    }
+
+    const fundWallet = Keypair.fromSecretKey(Buffer.from(fund.fundPrivateKey.split(","), "utf8"));
+    const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - 0.001; // GAS_FEE_RESERVE
+
+    if (totalSolToTransfer <= 0) {
+      return res.status(400).json({ error: `Insufficient funds after reserving gas: ${totalSolToTransfer} SOL` });
+    }
+
+    try {
+      const { tokenAddress, apiKey, walletPublicKey, privateKey } = await createAndLaunchTokenWithLightning(
+        fundWallet,
+        fund.tokenName,
+        fund.tokenSymbol,
+        fund.targetSolAmount,
+        new PublicKey(fund.targetWallet),
+        fund.initialFeePaid,
+        fund.targetPercentage,
+        fund.image,
+        totalSolToTransfer,
+        fund._id.toString()
+      );
+
+      fund.tokenAddress = tokenAddress;
+      fund.pumpPortalApiKey = apiKey;
+      fund.pumpPortalWalletPublicKey = walletPublicKey;
+      fund.pumpPortalPrivateKey = privateKey;
+      fund.launchError = null;
+      await fund.save();
+
+      res.json({
+        message: `Token launched successfully`,
+        tokenAddress,
+        signature: `https://solscan.io/tx/${tokenAddress}?cluster=devnet`, // Update with actual signature if available
+      });
+    } catch (error: unknown) {
+      console.error(`Manual token creation failed for fund ${id}:`, error);
+      fund.launchError = error instanceof Error ? error.message : "Unknown error during manual token creation";
+      await fund.save();
+      return res.status(500).json({ error: fund.launchError });
+    }
   })
 );
 
