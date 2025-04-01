@@ -13,7 +13,7 @@ import { logInfo, logError } from "../utils/logger";
 // Define a minimal type for PQueue
 interface PQueue {
   add: (fn: () => Promise<void>) => Promise<void>;
-  size: number; // Add size property for monitoring
+  size: number;
 }
 
 // Initialize PQueue lazily with dynamic import
@@ -212,6 +212,7 @@ router.get(
     const skip = (pageNum - 1) * limitNum;
 
     const funds = await Fund.find(query)
+      .sort({ createdAt: -1 }) // Newest first
       .skip(skip)
       .limit(limitNum)
       .populate("userId", "walletAddress");
@@ -541,9 +542,50 @@ router.post(
       return res.status(400).json({ error: "Token already launched" });
     }
 
-    const fundWallet = Keypair.fromSecretKey(bs58.default.decode(fund.fundPrivateKey));
-    const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - 0.05;
+    if (typeof fund.fundPrivateKey !== "string" || !fund.fundPrivateKey) {
+      logError(`Invalid fundPrivateKey for fund ${id}`, { fundPrivateKey: fund.fundPrivateKey });
+      return res.status(500).json({ error: "Fund private key is missing or invalid" });
+    }
 
+    console.log("Fund private key from DB:", fund.fundPrivateKey);
+    let fundWallet: Keypair;
+    try {
+      // Try Base58 decoding first (current standard)
+      fundWallet = Keypair.fromSecretKey(bs58.default.decode(fund.fundPrivateKey));
+      console.log("Decoded as Base58, public key:", fundWallet.publicKey.toBase58());
+    } catch (base58Error) {
+      logInfo(`Base58 decode failed for fund ${id}, attempting split format`, base58Error);
+      try {
+        // Fallback to split format (legacy)
+        if (fund.fundPrivateKey.includes(",")) {
+          const privateKeyArray = fund.fundPrivateKey.split(",").map(Number);
+          fundWallet = Keypair.fromSecretKey(Uint8Array.from(privateKeyArray));
+          console.log("Decoded as split array, public key:", fundWallet.publicKey.toBase58());
+
+          // Migrate to Base58: Update the database with the Base58-encoded version
+          const base58PrivateKey = bs58.default.encode(fundWallet.secretKey);
+          fund.fundPrivateKey = base58PrivateKey;
+          await fund.save();
+          logInfo(`Migrated fund ${id} private key to Base58 format`);
+        } else {
+          throw new Error("Neither Base58 nor split format worked");
+        }
+      } catch (splitError) {
+        logError(`Failed to decode fundPrivateKey for fund ${id}`, { base58Error, splitError });
+        return res.status(500).json({ error: "Invalid fund private key format" });
+      }
+    }
+
+    // Verify the public key matches fundWalletAddress
+    if (fundWallet.publicKey.toBase58() !== fund.fundWalletAddress) {
+      logError(`Public key mismatch for fund ${id}`, {
+        expected: fund.fundWalletAddress,
+        actual: fundWallet.publicKey.toBase58(),
+      });
+      return res.status(500).json({ error: "Fund wallet public key does not match stored address" });
+    }
+
+    const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - 0.05;
     if (totalSolToTransfer <= 0) {
       logError(`Insufficient funds for token launch in fund ${id}`, { totalSolToTransfer });
       return res.status(400).json({ error: `Insufficient funds after reserving gas: ${totalSolToTransfer} SOL` });
@@ -583,6 +625,35 @@ router.post(
       await fund.save();
       return res.status(500).json({ error: fund.launchError });
     }
+  })
+);
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    logInfo(`GET /funds/${id} - Fetching fund details`, { id });
+
+    const fund = await Fund.findById(id).populate("userId", "walletAddress");
+    if (!fund) {
+      logError(`Fund ${id} not found`);
+      return res.status(404).json({ error: `Fund with ID ${id} not found` });
+    }
+
+    let currentBalance: number | null = null;
+    try {
+      currentBalance = await getBalance(new PublicKey(fund.fundWalletAddress));
+    } catch (error) {
+      logError(`Failed to fetch balance for fund ${id}`, error);
+    }
+
+    const fundData = {
+      ...fund.toJSON(),
+      currentBalance,
+    };
+
+    res.json(fundData);
+    logInfo(`Returned fund details for ${id}`, { fundId: id, status: fund.status });
   })
 );
 
