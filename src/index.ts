@@ -71,7 +71,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/token-images", tokenImageRoutes);
 
 // Start server
-app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT}`));
+app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT} solana network: ${config.SOLANA_NETWORK}`));
 
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {
