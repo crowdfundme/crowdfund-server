@@ -1,6 +1,7 @@
 import express from "express";
 import User from "../models/User";
 import Fund from "../models/Fund";
+import mongoose from "mongoose"; 
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
 import { createAndLaunchTokenWithLightning } from "../utils/pumpfun";
 import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
@@ -192,9 +193,9 @@ router.post(
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const { status, page = "1", limit = "10" } = req.query;
+    const { status, page = "1", limit = "10", search } = req.query;
 
-    logInfo(`GET /funds - Fetching funds`, { status, page, limit });
+    logInfo(`GET /funds - Fetching funds`, { status, page, limit, search });
 
     if (status && !["active", "completed"].includes(status as string)) {
       logError(`Invalid status parameter: ${status}`);
@@ -208,7 +209,28 @@ router.get(
       return res.status(400).json({ error: "Page and limit must be positive integers." });
     }
 
-    const query = status ? { status } : {};
+    // Build the query
+    const query: any = {};
+    if (status) query.status = status;
+
+    // Add search functionality with space normalization
+    if (search && typeof search === "string") {
+      // Trim leading/trailing spaces and normalize multiple spaces to a single space
+      const normalizedSearch = search.trim().replace(/\s+/g, " ");
+      // Escape special regex characters to prevent injection or errors
+      const escapedSearch = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const searchRegex = new RegExp(escapedSearch, "i"); // Case-insensitive search
+
+      query.$or = [
+        { _id: mongoose.Types.ObjectId.isValid(normalizedSearch) ? normalizedSearch : null }, // Search by exact ID if valid
+        { name: searchRegex },
+        { tokenName: searchRegex },
+        { tokenSymbol: searchRegex },
+      ].filter((condition) => condition !== null); // Remove null conditions
+
+      logInfo(`Searching funds with normalized term: "${normalizedSearch}"`);
+    }
+
     const skip = (pageNum - 1) * limitNum;
 
     const funds = await Fund.find(query)
@@ -222,14 +244,21 @@ router.get(
       funds.map(async (fund) => {
         try {
           const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
+          const fundJson = fund.toJSON();
+          // Remove sensitive fields
+          delete fundJson.fundPrivateKey;
+          delete fundJson.pumpPortalPrivateKey;
           return {
-            ...fund.toJSON(),
+            ...fundJson,
             currentBalance: balance,
           };
         } catch (error) {
           logError(`Failed to fetch balance for fund ${fund._id}`, error);
+          const fundJson = fund.toJSON();
+          delete fundJson.fundPrivateKey;
+          delete fundJson.pumpPortalPrivateKey;
           return {
-            ...fund.toJSON(),
+            ...fundJson,
             currentBalance: null,
           };
         }
