@@ -24,6 +24,7 @@ console.log("Loaded configuration in index.ts:", {
   CLOUDINARY_CLOUD_NAME: config.CLOUDINARY_CLOUD_NAME,
   CLOUDINARY_API_KEY: config.CLOUDINARY_API_KEY,
   CLOUDINARY_API_SECRET: config.CLOUDINARY_API_SECRET ? "[hidden]" : undefined,
+  SOLANA_RPC_ENDPOINT: config.SOLANA_RPC_ENDPOINT
 });
 
 const app = express();
@@ -70,8 +71,15 @@ app.use("/api/funds", fundRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/token-images", tokenImageRoutes);
 
+// New endpoint to return Solana RPC URL
+app.get("/api/get-rpc-url", (req, res) => {
+  const rpcUrl = config.SOLANA_RPC_ENDPOINT;
+  console.log(`[API] Returning RPC URL: ${rpcUrl}`);
+  res.json({ rpcUrl });
+});
+
 // Start server
-app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT} solana network: ${config.SOLANA_NETWORK}`));
+app.listen(config.PORT, () => console.log(`Server running on port ${config.PORT} solana network: ${config.SOLANA_NETWORK} SOLANA_RPC_ENDPOINT: ${config.SOLANA_RPC_ENDPOINT}`));
 
 // Handle unhandled promise rejections
 process.on("unhandledRejection", (reason, promise) => {

@@ -1,9 +1,9 @@
 import express from "express";
 import User from "../models/User";
 import Fund from "../models/Fund";
-import mongoose from "mongoose"; 
+import mongoose from "mongoose";
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
-import { createAndLaunchTokenWithLightning } from "../utils/pumpfun";
+import { createAndLaunchTokenWithLightning ,createAndLaunchTokenWithLightning2} from "../utils/pumpfun";
 import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
@@ -380,6 +380,7 @@ router.post(
         await fund.save();
         logInfo(`Fund ${fund._id} saved as completed before token creation`);
 
+        /*
         setImmediate(async () => {
           try {
             const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl } = await createAndLaunchTokenWithLightning(
@@ -406,6 +407,38 @@ router.post(
           } catch (error: unknown) {
             logError(`Token creation failed for fund ${fund._id}`, error);
             fund.launchError = error instanceof Error ? error.message : "Unknown error during token creation/transfer";
+            await fund.save();
+          }
+        });*/
+
+        setImmediate(async () => {
+          try {
+            // Use createAndLaunchTokenWithLightning2 to prepare metadata without launching
+            const { apiKey, walletPublicKey, privateKey, metadataUri } = await createAndLaunchTokenWithLightning2(
+              fundWallet,
+              fund.tokenName,
+              fund.tokenSymbol,
+              fund.targetSolAmount,
+              new PublicKey(fund.targetWallet),
+              fund.initialFeePaid,
+              fund.targetPercentage,
+              fund.image || "",
+              totalSolToTransfer,
+              fund._id.toString()
+            );
+
+            // Save preparation data to the fund
+            fund.pumpPortalApiKey = apiKey;
+            fund.pumpPortalWalletPublicKey = walletPublicKey;
+            fund.pumpPortalPrivateKey = privateKey;
+            fund.metadataUri = metadataUri; // Assumes Fund schema has this field
+            fund.launchError = null;
+            await fund.save();
+
+            logInfo(`Token launch prepared for fund ${id}`, { metadataUri });
+          } catch (error: unknown) {
+            logError(`Token preparation failed for fund ${fund._id}`, error);
+            fund.launchError = error instanceof Error ? error.message : "Unknown error during token preparation";
             await fund.save();
           }
         });

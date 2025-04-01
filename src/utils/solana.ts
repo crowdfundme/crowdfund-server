@@ -29,7 +29,7 @@ let connection: Connection;
 
 export const getConnection = (): Connection => {
   if (!connection) {
-    const RPC_ENDPOINT = config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT;
+    const RPC_ENDPOINT = config.SOLANA_RPC_ENDPOINT;
     connection = new Connection(RPC_ENDPOINT, "confirmed");
     console.log(`Solana connection established to ${RPC_ENDPOINT}`);
 
