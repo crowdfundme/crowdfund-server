@@ -1,4 +1,3 @@
-// src/routes/funds.ts
 import express from "express";
 import User from "../models/User";
 import Fund from "../models/Fund";
@@ -193,18 +192,31 @@ router.post(
 router.get(
   "/",
   asyncHandler(async (req, res) => {
-    const { status } = req.query;
+    const { status, page = "1", limit = "10" } = req.query;
 
-    logInfo(`GET /funds - Fetching funds`, { status });
+    logInfo(`GET /funds - Fetching funds`, { status, page, limit });
 
     if (status && !["active", "completed"].includes(status as string)) {
       logError(`Invalid status parameter: ${status}`);
       return res.status(400).json({ error: "Invalid status parameter. Must be 'active' or 'completed'." });
     }
 
-    const query = status ? { status } : {};
-    const funds = await Fund.find(query).populate("userId", "walletAddress");
+    const pageNum = parseInt(page as string, 10);
+    const limitNum = parseInt(limit as string, 10);
+    if (isNaN(pageNum) || isNaN(limitNum) || pageNum < 1 || limitNum < 1) {
+      logError(`Invalid pagination parameters`, { page, limit });
+      return res.status(400).json({ error: "Page and limit must be positive integers." });
+    }
 
+    const query = status ? { status } : {};
+    const skip = (pageNum - 1) * limitNum;
+
+    const funds = await Fund.find(query)
+      .skip(skip)
+      .limit(limitNum)
+      .populate("userId", "walletAddress");
+
+    const totalFunds = await Fund.countDocuments(query);
     const fundsWithBalances = await Promise.all(
       funds.map(async (fund) => {
         try {
@@ -217,14 +229,19 @@ router.get(
           logError(`Failed to fetch balance for fund ${fund._id}`, error);
           return {
             ...fund.toJSON(),
-            currentBalance: null, // Or handle as needed
+            currentBalance: null,
           };
         }
       })
     );
 
-    res.json(fundsWithBalances);
-    logInfo(`Returned ${fundsWithBalances.length} funds`);
+    res.json({
+      funds: fundsWithBalances,
+      total: totalFunds,
+      page: pageNum,
+      pages: Math.ceil(totalFunds / limitNum),
+    });
+    logInfo(`Returned ${fundsWithBalances.length} funds of ${totalFunds} total, page ${pageNum}/${Math.ceil(totalFunds / limitNum)}`);
   })
 );
 
