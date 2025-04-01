@@ -340,8 +340,8 @@ export const createAndLaunchTokenWithLightning = async (
 ): Promise<{ tokenAddress: string; apiKey: string; walletPublicKey: string; privateKey: string; solscanUrl: string }> => {
   console.log("Running pumpfun.ts version: 2025-03-31 (Lightning Transaction)");
   const connection = getConnection();
-  const GAS_FEE_RESERVE = 0.05; // Gas for Pump wallet
-  const FUND_WALLET_RESERVE = 0.02; // Reserve for fund wallet operations
+  const GAS_FEE_RESERVE = 0.05;
+  const FUND_WALLET_RESERVE = 0.02;
   const MIN_EXCESS_THRESHOLD = 0.005;
   const config = getConfig();
 
@@ -416,37 +416,36 @@ export const createAndLaunchTokenWithLightning = async (
     if (!metadataResponse.ok) throw new Error(`Failed to upload metadata: ${await metadataResponse.text()}`);
     const metadataResponseJSON = await metadataResponse.json();
 
-    const pumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
+    const pumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
     console.log(`Pump wallet balance before transfer: ${pumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
 
     const donatedSol = fund.currentDonatedSol || totalSolToTransfer;
-    const buffer = donatedSol * 0.1; // 10% of donated SOL
-    const solForCreation = donatedSol - buffer; // 90% for token creation
-    const requiredPumpSol = solForCreation + GAS_FEE_RESERVE; // Total for Pump wallet
+    const buffer = donatedSol * 0.1;
+    const solForCreation = donatedSol - buffer;
+    const requiredPumpSol = solForCreation + GAS_FEE_RESERVE;
     console.log(`Using ${solForCreation} SOL from donations for token creation (90% of ${donatedSol}), required for Pump wallet with gas (${GAS_FEE_RESERVE} SOL): ${requiredPumpSol} SOL`);
 
     if (!fund.pumpPortalTransferCompleted && pumpWalletBalance < requiredPumpSol) {
-      const fundWalletBalance = await connection.getBalance(fundWallet.publicKey, "finalized") / 1_000_000_000;
+      const fundWalletBalance = await connection.getBalance(fundWallet.publicKey, "confirmed") / 1_000_000_000;
       console.log(`Fund wallet balance: ${fundWalletBalance} SOL`);
-      const maxTransfer = fundWalletBalance - FUND_WALLET_RESERVE; // Leave 0.02 SOL in fund wallet
+      const maxTransfer = fundWalletBalance - FUND_WALLET_RESERVE;
       const transferAmount = Math.min(requiredPumpSol - pumpWalletBalance, maxTransfer);
       if (transferAmount <= 0 || fundWalletBalance < FUND_WALLET_RESERVE + 0.001) {
         throw new Error(`Insufficient funds in fundWallet: ${fundWalletBalance} SOL, need at least ${FUND_WALLET_RESERVE + 0.001} SOL`);
       }
       console.log(`Preparing to transfer ${transferAmount} SOL from fund wallet ${fundWallet.publicKey.toBase58()} to pump wallet ${pumpWalletKeypair.publicKey.toBase58()}`);
       const transferSignature = await transferSol(fundWallet, pumpWalletKeypair.publicKey, transferAmount);
-      await connection.confirmTransaction(transferSignature, "finalized");
+      await connection.confirmTransaction(transferSignature, "confirmed");
       console.log(`SOL transfer confirmed: ${transferSignature}, transferred ${transferAmount} SOL, leaving ${fundWalletBalance - transferAmount} SOL in fund wallet`);
       fund.pumpPortalTransferCompleted = true;
       await fund.save();
 
-      // Add a small delay to ensure balance propagates
       await new Promise(resolve => setTimeout(resolve, 2000));
     } else {
       console.log(`Transfer already completed or sufficient SOL in Pump wallet: ${pumpWalletBalance} SOL, skipping transfer`);
     }
 
-    const updatedPumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
+    const updatedPumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
     console.log(`Pump wallet balance before creation: ${updatedPumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
     const adjustedSolForCreation = Math.min(totalSolToTransfer - GAS_FEE_RESERVE, updatedPumpWalletBalance - GAS_FEE_RESERVE);
     if (adjustedSolForCreation <= 0) {
@@ -491,18 +490,13 @@ export const createAndLaunchTokenWithLightning = async (
     console.log(`Token mint address: ${tokenAddress}`);
 
     const totalSupply = 1_000_000_000 * 10 ** 6;
-    const pumpWalletBalanceAfter = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
+    const pumpWalletBalanceAfter = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
     console.log(`Pump wallet balance after creation: ${pumpWalletBalanceAfter} SOL`);
-    if (pumpWalletBalanceAfter >= updatedPumpWalletBalance - 0.05) {
-      console.warn(`SOL usage minimal: ${pumpWalletBalanceAfter} SOL remaining of ${updatedPumpWalletBalance} SOL. Checking token supply...`);
-      const mintInfo = await connection.getParsedAccountInfo(new PublicKey(tokenAddress), "confirmed");
-      console.log(`Mint info: ${JSON.stringify(mintInfo.value, null, 2)}`);
-    }
 
     const pumpTokenAccountAddress = await getAssociatedTokenAddress(new PublicKey(tokenAddress), pumpWalletKeypair.publicKey);
     console.log(`Waiting for ATA to propagate: ${pumpTokenAccountAddress.toBase58()}`);
     let boughtAmount;
-    for (let attempt = 0; attempt < 10; attempt++) { // Reduced to 10 attempts
+    for (let attempt = 0; attempt < 5; attempt++) { // Reduced to 5 attempts
       try {
         boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccountAddress, "confirmed");
         if (!boughtAmount || boughtAmount.value.uiAmount === null || boughtAmount.value.uiAmount === 0) {
@@ -511,12 +505,12 @@ export const createAndLaunchTokenWithLightning = async (
         console.log(`Tokens received: ${boughtAmount.value.uiAmount} ${tokenSymbol}`);
         break;
       } catch (error) {
-        if (attempt < 9) {
-          console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 10 seconds...`);
-          await new Promise(resolve => setTimeout(resolve, 10000));
+        if (attempt < 4) {
+          console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 5 seconds...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
           continue;
         }
-        console.error(`Failed to retrieve token balance after 10 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
+        console.error(`Failed to retrieve token balance after 5 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
         throw new Error("Pump.fun Lightning failed to mint tokens to ATA");
       }
     }
@@ -544,7 +538,7 @@ export const createAndLaunchTokenWithLightning = async (
     );
     console.log(`Transferred ${transferAmount / 10 ** 6} ${tokenSymbol} to ${targetWallet.toBase58()}`);
 
-    const pumpWalletBalanceFinal = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
+    const pumpWalletBalanceFinal = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
     if (pumpWalletBalanceFinal > MIN_EXCESS_THRESHOLD) {
       const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
       await transferSol(pumpWalletKeypair, websiteWallet, pumpWalletBalanceFinal - 0.001);

@@ -36,10 +36,7 @@ app.use(cors({
 app.use(express.json());
 
 // Connect to MongoDB using the config
-mongoose.connect(config.MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-} as any).then(() => console.log("MongoDB connected")).catch(err => console.error("MongoDB connection error:", err));
+mongoose.connect(config.MONGO_URI).then(() => console.log("MongoDB connected")).catch(err => console.error("MongoDB connection error:", err));
 
 // Routes
 app.use("/api/funds", fundRoutes);
