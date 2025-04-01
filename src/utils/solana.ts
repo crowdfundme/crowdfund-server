@@ -1,118 +1,186 @@
 // src/utils/solana.ts
-import { Connection, PublicKey, Transaction, Keypair, SystemProgram, Commitment } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+  SendOptions,
+  Signer,
+  VersionedTransaction,
+} from "@solana/web3.js";
 import Bottleneck from "bottleneck";
 import { getConfig } from "../config";
-import { logInfo, logError } from "../utils/logger";
 
+// Load configuration
 const config = getConfig();
-const connection = new Connection(
-  config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT,
-  "confirmed"
-);
 
-// Rate limiter: Adjusted for 40 requests/sec, 2400/minute (example)
+// Rate limiter for Solana RPC calls
 const limiter = new Bottleneck({
-  maxConcurrent: 10,
-  minTime: 25, // ~40 req/sec (1000ms / 40)
-  reservoir: 2400,
-  reservoirRefreshAmount: 2400,
+  maxConcurrent: 2,
+  minTime: 100,
+  reservoir: 40,
+  reservoirRefreshAmount: 40,
   reservoirRefreshInterval: 60 * 1000,
 });
 
-export const getConnection = () => connection;
+let connection: Connection;
 
-export const generateWallet = () => {
-  return Keypair.generate();
+export const getConnection = (): Connection => {
+  if (!connection) {
+    const RPC_ENDPOINT = config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT;
+    connection = new Connection(RPC_ENDPOINT, "confirmed");
+    console.log(`Solana connection established to ${RPC_ENDPOINT}`);
+
+    // Store original methods
+    const originalMethods = {
+      getBalance: connection.getBalance.bind(connection),
+      getLatestBlockhash: connection.getLatestBlockhash.bind(connection),
+      getParsedTransaction: connection.getParsedTransaction.bind(connection),
+      confirmTransaction: connection.confirmTransaction.bind(connection),
+      sendTransaction: connection.sendTransaction.bind(connection),
+      getTokenAccountBalance: connection.getTokenAccountBalance.bind(connection),
+      getParsedAccountInfo: connection.getParsedAccountInfo.bind(connection),
+    };
+
+    // Wrap methods with throttling
+    connection.getBalance = async (publicKey, commitment) =>
+      limiter.schedule(() => originalMethods.getBalance(publicKey, commitment));
+    connection.getLatestBlockhash = async (commitmentOrConfig) =>
+      limiter.schedule(() => originalMethods.getLatestBlockhash(commitmentOrConfig));
+    connection.getParsedTransaction = async (txSignature, options) =>
+      limiter.schedule(() => originalMethods.getParsedTransaction(txSignature, options));
+    connection.confirmTransaction = async (txSignature, commitment) =>
+      limiter.schedule(() => originalMethods.confirmTransaction(txSignature as string, commitment));
+
+    // Overload signatures for sendTransaction
+    async function sendTransaction(
+      transaction: Transaction,
+      signers: Signer[],
+      options?: SendOptions
+    ): Promise<string>;
+    async function sendTransaction(
+      transaction: VersionedTransaction,
+      options?: SendOptions
+    ): Promise<string>;
+    async function sendTransaction(
+      transaction: Transaction | VersionedTransaction,
+      signersOrOptions?: Signer[] | SendOptions,
+      options?: SendOptions
+    ): Promise<string> {
+      if ('signatures' in transaction) {
+        // Transaction case
+        const signers = signersOrOptions as Signer[];
+        return limiter.schedule(() => originalMethods.sendTransaction(transaction as Transaction, signers, options));
+      } else {
+        // VersionedTransaction case
+        const opts = signersOrOptions as SendOptions | undefined;
+        return limiter.schedule(() => originalMethods.sendTransaction(transaction as VersionedTransaction, opts));
+      }
+    }
+    connection.sendTransaction = sendTransaction;
+
+    connection.getTokenAccountBalance = async (publicKey, commitment) =>
+      limiter.schedule(() => originalMethods.getTokenAccountBalance(publicKey, commitment));
+    connection.getParsedAccountInfo = async (publicKey, commitment) =>
+      limiter.schedule(() => originalMethods.getParsedAccountInfo(publicKey, commitment));
+  }
+  return connection;
 };
 
-async function withBackoff<T>(fn: () => Promise<T>, maxRetries: number = 5, baseDelay: number = 500): Promise<T> {
-  let attempt = 0;
-  while (attempt < maxRetries) {
+// Throttled RPC call wrapper with retries
+const withRetry = async <T>(fn: () => Promise<T>, maxRetries = 5, baseDelay = 500): Promise<T> => {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error: any) {
-      if (error.message.includes("429 Too Many Requests") && attempt < maxRetries - 1) {
-        const delay = Math.min(baseDelay * 2 ** attempt, 30000); // Cap at 30s
-        const jitter = Math.random() * 100;
-        logInfo(`429 detected, retrying after ${delay + jitter}ms`, { attempt: attempt + 1 });
-        await new Promise((resolve) => setTimeout(resolve, delay + jitter));
-        attempt++;
-      } else {
-        logError(`RPC call failed after ${attempt + 1} attempts`, error);
-        throw error;
+      if (error.message?.includes("429 Too Many Requests") && attempt < maxRetries) {
+        const delay = baseDelay * 2 ** attempt;
+        console.log(`Server responded with 429 Too Many Requests. Retrying after ${delay}ms delay...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
       }
+      throw error;
     }
   }
   throw new Error("Max retries reached");
-}
-
-// Define getBalance with explicit typing
-const getBalanceFn = async (publicKey: PublicKey, commitment?: Commitment): Promise<number> => {
-  return withBackoff(async () => {
-    const balance = await connection.getBalance(publicKey, commitment);
-    const solBalance = balance / 1_000_000_000;
-    logInfo(`Fetched balance for ${publicKey.toBase58()}: ${solBalance} SOL`, { commitment });
-    return solBalance;
-  });
 };
 
-// Export rate-limited version
-export const getBalance: typeof getBalanceFn = limiter.wrap(getBalanceFn);
+export const transferSol = async (fromWallet: Keypair, toPublicKey: PublicKey, amountSol: number): Promise<string> => {
+  const connection = getConnection();
+  const lamports = Math.floor(amountSol * LAMPORTS_PER_SOL);
 
-export const transferSol = limiter.wrap(async (from: Keypair, to: PublicKey, amount: number) => {
-  return withBackoff(async () => {
-    const lamports = Math.round(amount * 1_000_000_000);
-    const transaction = new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: from.publicKey,
-        toPubkey: to,
-        lamports: BigInt(lamports),
-      })
-    );
+  const transaction = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: fromWallet.publicKey,
+      toPubkey: toPublicKey,
+      lamports,
+    })
+  );
 
-    const { blockhash } = await connection.getLatestBlockhash();
-    transaction.recentBlockhash = blockhash;
-    transaction.feePayer = from.publicKey;
+  const { blockhash } = await withRetry(() => connection.getLatestBlockhash("confirmed"));
+  transaction.recentBlockhash = blockhash;
+  transaction.feePayer = fromWallet.publicKey;
 
-    const signature = await connection.sendTransaction(transaction, [from], { skipPreflight: true });
-    await connection.confirmTransaction(signature, "confirmed");
-    logInfo(`Transferred ${amount} SOL from ${from.publicKey.toBase58()} to ${to.toBase58()}`, { signature });
-    return signature;
-  });
-});
+  const signature = await withRetry(() => connection.sendTransaction(transaction, [fromWallet], { skipPreflight: true }));
+  await confirmTransaction(signature);
+  return signature;
+};
 
-export const verifySolPayment = limiter.wrap(
-  async (txSignature: string, senderWallet: string, receiverWallet: string, requiredAmount: number): Promise<boolean> => {
-    return withBackoff(async () => {
-      logInfo("Verifying SOL payment", { txSignature, senderWallet, receiverWallet, requiredAmount });
-      const transaction = await connection.getParsedTransaction(txSignature, {
-        commitment: "confirmed",
-        maxSupportedTransactionVersion: undefined,
-      });
+export const verifySolPayment = async (
+  txSignature: string,
+  senderWallet: string,
+  receiverWallet: string,
+  requiredAmount: number
+): Promise<boolean> => {
+  const connection = getConnection();
+  const senderPublicKey = new PublicKey(senderWallet);
+  const receiverPublicKey = new PublicKey(receiverWallet);
+  const requiredLamports = Math.floor(requiredAmount * LAMPORTS_PER_SOL);
 
-      if (!transaction || !transaction.meta) {
-        logInfo("Transaction not found or not confirmed yet", { txSignature });
-        return false;
-      }
-
-      logInfo("Transaction instructions", JSON.stringify(transaction.transaction.message.instructions, null, 2));
-      const lamportsExpected = Math.round(requiredAmount * 1_000_000_000);
-      const transferInstruction = transaction.transaction.message.instructions.find(
-        (ix: any) =>
-          ix.programId.toString() === SystemProgram.programId.toString() &&
-          ix.parsed?.type === "transfer" &&
-          ix.parsed.info.source === senderWallet &&
-          ix.parsed.info.destination === receiverWallet &&
-          Math.abs(ix.parsed.info.lamports - lamportsExpected) <= 100
-      );
-
-      if (!transferInstruction) {
-        logInfo("No valid SOL transfer found", { expectedLamports: lamportsExpected });
-        return false;
-      }
-
-      logInfo("SOL payment verified successfully", JSON.stringify(transferInstruction, null, 2));
-      return true;
-    });
+  const txInfo = await withRetry(() => connection.getParsedTransaction(txSignature, { commitment: "confirmed" }));
+  if (!txInfo || txInfo.slot === 0) {
+    throw new Error(`Transaction ${txSignature} not found or not confirmed`);
   }
-);
+
+  const instructions = txInfo.transaction.message.instructions;
+  console.log("Transaction instructions", instructions);
+
+  const transferInstruction = instructions.find((instr) =>
+    "parsed" in instr &&
+    instr.parsed.type === "transfer" &&
+    instr.program === "system" &&
+    instr.parsed.info.source === senderPublicKey.toBase58() &&
+    instr.parsed.info.destination === receiverPublicKey.toBase58()
+  );
+
+  if (!transferInstruction || !("parsed" in transferInstruction)) {
+    throw new Error("No valid SOL transfer found in transaction");
+  }
+
+  const { lamports } = transferInstruction.parsed.info;
+  if (lamports < requiredLamports) {
+    throw new Error(`Transferred amount ${lamports / LAMPORTS_PER_SOL} SOL is less than required ${requiredAmount} SOL`);
+  }
+
+  console.log("SOL payment verified successfully", transferInstruction);
+  return true;
+};
+
+export const confirmTransaction = async (txSignature: string): Promise<void> => {
+  const connection = getConnection();
+  await withRetry(() => connection.confirmTransaction(txSignature, "confirmed"));
+  console.log(`Transaction ${txSignature} confirmed`);
+};
+
+export const getBalance = async (publicKey: PublicKey): Promise<number> => {
+  const connection = getConnection();
+  const balance = await withRetry(() => connection.getBalance(publicKey, "confirmed"));
+  console.log(`Fetched balance for ${publicKey.toBase58()}: ${balance / LAMPORTS_PER_SOL} SOL`, { commitment: "confirmed" });
+  return balance / LAMPORTS_PER_SOL;
+};
+
+export const generateWallet = (): Keypair => {
+  return Keypair.generate();
+};

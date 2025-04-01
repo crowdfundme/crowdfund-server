@@ -1,7 +1,17 @@
-import { Keypair, PublicKey } from "@solana/web3.js";
-import { transferSol, getConnection } from "./solana";
+// src/utils/pumpfun.ts
+import {
+  Keypair,
+  PublicKey,
+  Connection,
+  TransactionInstruction,
+  LAMPORTS_PER_SOL,
+  RpcResponseAndContext,
+  TokenAmount,
+  TransactionMessage,
+  VersionedTransaction,
+} from "@solana/web3.js";
+import { transferSol, getConnection, getBalance, confirmTransaction } from "./solana";
 import { createMint, mintTo, getOrCreateAssociatedTokenAccount, transfer, getAssociatedTokenAddress } from "@solana/spl-token";
-import { VersionedTransaction, Connection, TransactionInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { getConfig } from "../config";
 import Fund from "../models/Fund";
@@ -23,7 +33,7 @@ export const createAndLaunchToken = async (
   console.log(`Creating token with ${targetSol} SOL for ${tokenName} (${tokenSymbol}) at ${targetPercentage}% target`);
 
   try {
-    const balance = await connection.getBalance(fundWallet.publicKey) / 1_000_000_000;
+    const balance = await getBalance(fundWallet.publicKey);
     const requiredSol = targetSol + 0.01;
     if (balance < requiredSol) {
       throw new Error(`Insufficient funds in fundWallet: ${balance} SOL, required: ${requiredSol} SOL`);
@@ -70,6 +80,43 @@ export const createAndLaunchToken = async (
   }
 };
 
+// Fetch with retry utility
+async function fetchWithRetry(url: string, options: RequestInit, retries = 3): Promise<Response> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+      return response;
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      console.log(`Fetch failed, retrying (${i + 1}/${retries})`, error);
+      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+    }
+  }
+  throw new Error("Max retries reached");
+}
+
+// Dynamic gas fee calculation using getFeeForMessage
+const calculateGasFeeReserve = async (connection: Connection): Promise<number> => {
+  try {
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+    const dummyMessage = new TransactionMessage({
+      payerKey: new PublicKey("11111111111111111111111111111111"),
+      recentBlockhash: blockhash,
+      instructions: [],
+    }).compileToV0Message();
+
+    const feeResponse = await connection.getFeeForMessage(dummyMessage, "confirmed");
+    if (!feeResponse.value) {
+      throw new Error("Failed to calculate transaction fee");
+    }
+    return (feeResponse.value * 10) / LAMPORTS_PER_SOL;
+  } catch (error) {
+    console.error("Failed to calculate gas fee reserve:", error);
+    return 0.05; // Fallback
+  }
+};
+
 // Real Pump.fun API integration with Cloudinary image (Local Transaction)
 export const createAndLaunchTokenWithApi = async (
   fundWallet: Keypair,
@@ -86,17 +133,11 @@ export const createAndLaunchTokenWithApi = async (
   console.log("Running pumpfun.ts version: 2025-03-31 (Local Transaction)");
   const config = getConfig();
   const connection = getConnection();
-  
-  var RPC_ENDPOINT;
-  if(config.SOLANA_NETWORK === "mainnet"){
-    RPC_ENDPOINT = config.SOLANA_RPC_LIVE_ENDPOINT;
-  }else{
-    RPC_ENDPOINT = config.SOLANA_RPC_DEV_ENDPOINT;
-  }  
-  
+
+  const RPC_ENDPOINT = config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT;
   const web3Connection = new Connection(RPC_ENDPOINT, "confirmed");
-  const GAS_FEE_RESERVE = 0.11;
-  const MIN_EXCESS_THRESHOLD = 0.005;  
+  const GAS_FEE_RESERVE = await calculateGasFeeReserve(web3Connection);
+  const MIN_EXCESS_THRESHOLD = 0.005;
 
   try {
     const fund = await Fund.findById(fundId);
@@ -123,8 +164,7 @@ export const createAndLaunchTokenWithApi = async (
       fund.pumpPortalApiKey.length > 0;
 
     if (!hasWalletDetails) {
-      const walletResponse = await fetch("https://pumpportal.fun/api/create-wallet", { method: "GET" });
-      if (!walletResponse.ok) throw new Error(`Failed to create PumpPortal wallet: ${walletResponse.statusText}`);
+      const walletResponse = await fetchWithRetry("https://pumpportal.fun/api/create-wallet", { method: "GET" });
       const walletData = await walletResponse.json();
       apiKey = walletData.apiKey;
       walletPublicKey = walletData.walletPublicKey;
@@ -146,8 +186,7 @@ export const createAndLaunchTokenWithApi = async (
 
     let fullImageUrl = imageUrl.startsWith("http") ? imageUrl : `https://res.cloudinary.com/${config.CLOUDINARY_CLOUD_NAME}/image/upload/${imageUrl}`;
     console.log(`Fetching image from: ${fullImageUrl}`);
-    const imageResponse = await fetch(fullImageUrl);
-    if (!imageResponse.ok) throw new Error(`Failed to fetch image: ${imageResponse.statusText}`);
+    const imageResponse = await fetchWithRetry(fullImageUrl, {});
     const imageBlob = await imageResponse.blob();
 
     const formData = new FormData();
@@ -160,20 +199,19 @@ export const createAndLaunchTokenWithApi = async (
     formData.append("website", "https://example.com");
     formData.append("showName", "true");
 
-    const metadataResponse = await fetch("https://pump.fun/api/ipfs", {
+    const metadataResponse = await fetchWithRetry("https://pump.fun/api/ipfs", {
       method: "POST",
       body: formData,
     });
-    if (!metadataResponse.ok) throw new Error(`Failed to upload metadata: ${await metadataResponse.text()}`);
     const metadataResponseJSON = await metadataResponse.json();
 
-    const pumpWalletBalance = await web3Connection.getBalance(pumpWalletKeypair.publicKey) / 1_000_000_000;
+    const pumpWalletBalance = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance before transfer: ${pumpWalletBalance} SOL`);
     const requiredSol = totalSolToTransfer + GAS_FEE_RESERVE;
     if (!fund.pumpPortalTransferCompleted && pumpWalletBalance < requiredSol) {
       const transferAmount = requiredSol - pumpWalletBalance + 0.01;
       console.log(`Preparing to transfer ${transferAmount} SOL from fund wallet ${fundWallet.publicKey.toBase58()} to pump wallet ${pumpWalletKeypair.publicKey.toBase58()}`);
-      const fundWalletBalance = await web3Connection.getBalance(fundWallet.publicKey) / 1_000_000_000;
+      const fundWalletBalance = await getBalance(fundWallet.publicKey);
       console.log(`Fund wallet balance: ${fundWalletBalance} SOL`);
       if (fundWalletBalance < transferAmount + 0.001) {
         throw new Error(`Insufficient funds in fundWallet: ${fundWalletBalance} SOL, need ${transferAmount + 0.001} SOL`);
@@ -186,9 +224,9 @@ export const createAndLaunchTokenWithApi = async (
       console.log(`Transfer already completed or sufficient SOL in Pump wallet: ${pumpWalletBalance} SOL, skipping transfer`);
     }
 
-    const updatedPumpWalletBalance = await web3Connection.getBalance(pumpWalletKeypair.publicKey) / 1_000_000_000;
+    const updatedPumpWalletBalance = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance before creation: ${updatedPumpWalletBalance} SOL`);
-    const solForCreation = Math.min(updatedPumpWalletBalance - GAS_FEE_RESERVE, 0.1); // Test with 0.1 SOL
+    const solForCreation = Math.min(updatedPumpWalletBalance - GAS_FEE_RESERVE, 0.1);
     if (solForCreation <= 0) {
       throw new Error(`Insufficient SOL for creation after reserving gas: ${solForCreation} SOL (balance: ${updatedPumpWalletBalance} SOL)`);
     }
@@ -212,17 +250,11 @@ export const createAndLaunchTokenWithApi = async (
     };
     console.log("Sending create payload to Pump.fun (Local):", createPayload);
 
-    const createResponse = await fetch("https://pumpportal.fun/api/trade-local", {
+    const createResponse = await fetchWithRetry("https://pumpportal.fun/api/trade-local", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(createPayload),
     });
-
-    if (!createResponse.ok) {
-      const errorText = await createResponse.text();
-      console.error(`Pump.fun API error response: ${errorText}`);
-      throw new Error(`Failed to create token: ${createResponse.statusText} - ${errorText}`);
-    }
 
     const txData = await createResponse.arrayBuffer();
     const tx = VersionedTransaction.deserialize(new Uint8Array(txData));
@@ -247,37 +279,43 @@ export const createAndLaunchTokenWithApi = async (
     const skipPreflight = true;
     console.log("Sending transaction with options:", { skipPreflight, maxRetries: 5 });
     const signature = await web3Connection.sendTransaction(tx, { skipPreflight, maxRetries: 5 });
-    await web3Connection.confirmTransaction(signature, "confirmed");
+    await confirmTransaction(signature);
     console.log(`Token created: https://solscan.io/tx/${signature}?cluster=devnet`);
     console.log(`Token mint address: ${mintKeypair.publicKey.toBase58()}`);
 
     const totalSupply = 1_000_000_000 * 10 ** 6;
-    const pumpWalletBalanceAfter = await connection.getBalance(pumpWalletKeypair.publicKey) / 1_000_000_000;
+    const pumpWalletBalanceAfter = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance after creation: ${pumpWalletBalanceAfter} SOL`);
     if (pumpWalletBalanceAfter >= updatedPumpWalletBalance - 0.05) {
       console.warn(`SOL usage minimal: ${pumpWalletBalanceAfter} SOL remaining of ${updatedPumpWalletBalance} SOL. Checking token supply...`);
-      const mintInfo = await connection.getParsedAccountInfo(mintKeypair.publicKey, "confirmed");
+      const mintInfo = await web3Connection.getParsedAccountInfo(mintKeypair.publicKey, "confirmed");
       console.log(`Mint info: ${JSON.stringify(mintInfo.value, null, 2)}`);
     }
 
-    const pumpTokenAccountAddress = await getAssociatedTokenAddress(mintKeypair.publicKey, pumpWalletKeypair.publicKey);
-    console.log(`Waiting for ATA to propagate: ${pumpTokenAccountAddress.toBase58()}`);
-    let boughtAmount;
-    for (let attempt = 0; attempt < 20; attempt++) {
+    const pumpTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      pumpWalletKeypair,
+      mintKeypair.publicKey,
+      pumpWalletKeypair.publicKey
+    );
+    console.log(`Waiting for ATA to propagate: ${pumpTokenAccount.address.toBase58()}`);
+    let boughtAmount: RpcResponseAndContext<TokenAmount> | undefined;
+    const maxAttempts = 5;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccountAddress, "confirmed");
+        boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccount.address, "confirmed");
         if (!boughtAmount || boughtAmount.value.uiAmount === null || boughtAmount.value.uiAmount === 0) {
-          throw new Error(`No tokens received in pump wallet after attempt ${attempt + 1}`);
+          throw new Error(`No tokens received after attempt ${attempt + 1}`);
         }
         console.log(`Tokens received: ${boughtAmount.value.uiAmount} ${tokenSymbol}`);
         break;
       } catch (error) {
-        if (attempt < 19) {
-          console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 10 seconds...`);
-          await new Promise(resolve => setTimeout(resolve, 10000));
+        if (attempt < maxAttempts - 1) {
+          console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 5s...`);
+          await new Promise(resolve => setTimeout(resolve, 5000));
           continue;
         }
-        console.error(`Failed to retrieve token balance after 20 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
+        console.error(`Failed to retrieve token balance after ${maxAttempts} attempts:`, error);
         throw new Error("Pump.fun failed to mint tokens to ATA");
       }
     }
@@ -294,14 +332,14 @@ export const createAndLaunchTokenWithApi = async (
     await transfer(
       connection,
       pumpWalletKeypair,
-      pumpTokenAccountAddress,
-      targetWallet,
+      pumpTokenAccount.address,
+      targetTokenAccount.address,
       pumpWalletKeypair,
       transferAmount
     );
     console.log(`Transferred ${transferAmount / 10 ** 6} ${tokenSymbol} to ${targetWallet.toBase58()}`);
 
-    const pumpWalletBalanceFinal = await connection.getBalance(pumpWalletKeypair.publicKey) / 1_000_000_000;
+    const pumpWalletBalanceFinal = await getBalance(pumpWalletKeypair.publicKey);
     if (pumpWalletBalanceFinal > MIN_EXCESS_THRESHOLD) {
       const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
       await transferSol(pumpWalletKeypair, websiteWallet, pumpWalletBalanceFinal - 0.001);
@@ -318,9 +356,6 @@ export const createAndLaunchTokenWithApi = async (
     };
   } catch (error) {
     console.error("Failed to create and launch token with API (Local):", error);
-    if (error instanceof Error && error.name === "SendTransactionError") {
-      console.log("Transaction logs:", (error as any).transactionLogs);
-    }
     throw error;
   }
 };
@@ -340,7 +375,7 @@ export const createAndLaunchTokenWithLightning = async (
 ): Promise<{ tokenAddress: string; apiKey: string; walletPublicKey: string; privateKey: string; solscanUrl: string }> => {
   console.log("Running pumpfun.ts version: 2025-03-31 (Lightning Transaction)");
   const connection = getConnection();
-  const GAS_FEE_RESERVE = 0.05;
+  const GAS_FEE_RESERVE = await calculateGasFeeReserve(connection);
   const FUND_WALLET_RESERVE = 0.02;
   const MIN_EXCESS_THRESHOLD = 0.005;
   const config = getConfig();
@@ -371,8 +406,7 @@ export const createAndLaunchTokenWithLightning = async (
       fund.pumpPortalApiKey.length > 0;
 
     if (!hasWalletDetails) {
-      const walletResponse = await fetch("https://pumpportal.fun/api/create-wallet", { method: "GET" });
-      if (!walletResponse.ok) throw new Error(`Failed to create PumpPortal wallet: ${walletResponse.statusText}`);
+      const walletResponse = await fetchWithRetry("https://pumpportal.fun/api/create-wallet", { method: "GET" });
       const walletData = await walletResponse.json();
       apiKey = walletData.apiKey;
       walletPublicKey = walletData.walletPublicKey;
@@ -395,8 +429,7 @@ export const createAndLaunchTokenWithLightning = async (
     if (!imageUrl) throw new Error("Image URL is missing");
     let fullImageUrl = imageUrl.startsWith("http") ? imageUrl : `https://res.cloudinary.com/${config.CLOUDINARY_CLOUD_NAME}/image/upload/${imageUrl}`;
     console.log(`Fetching image from: ${fullImageUrl}`);
-    const imageResponse = await fetch(fullImageUrl);
-    if (!imageResponse.ok) throw new Error(`Failed to fetch image: ${imageResponse.statusText}`);
+    const imageResponse = await fetchWithRetry(fullImageUrl, {});
     const imageBlob = await imageResponse.blob();
 
     const formData = new FormData();
@@ -409,14 +442,13 @@ export const createAndLaunchTokenWithLightning = async (
     formData.append("website", "https://example.com");
     formData.append("showName", "true");
 
-    const metadataResponse = await fetch("https://pump.fun/api/ipfs", {
+    const metadataResponse = await fetchWithRetry("https://pump.fun/api/ipfs", {
       method: "POST",
       body: formData,
     });
-    if (!metadataResponse.ok) throw new Error(`Failed to upload metadata: ${await metadataResponse.text()}`);
     const metadataResponseJSON = await metadataResponse.json();
 
-    const pumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
+    const pumpWalletBalance = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance before transfer: ${pumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
 
     const donatedSol = fund.currentDonatedSol || totalSolToTransfer;
@@ -426,7 +458,7 @@ export const createAndLaunchTokenWithLightning = async (
     console.log(`Using ${solForCreation} SOL from donations for token creation (90% of ${donatedSol}), required for Pump wallet with gas (${GAS_FEE_RESERVE} SOL): ${requiredPumpSol} SOL`);
 
     if (!fund.pumpPortalTransferCompleted && pumpWalletBalance < requiredPumpSol) {
-      const fundWalletBalance = await connection.getBalance(fundWallet.publicKey, "confirmed") / 1_000_000_000;
+      const fundWalletBalance = await getBalance(fundWallet.publicKey);
       console.log(`Fund wallet balance: ${fundWalletBalance} SOL`);
       const maxTransfer = fundWalletBalance - FUND_WALLET_RESERVE;
       const transferAmount = Math.min(requiredPumpSol - pumpWalletBalance, maxTransfer);
@@ -435,7 +467,7 @@ export const createAndLaunchTokenWithLightning = async (
       }
       console.log(`Preparing to transfer ${transferAmount} SOL from fund wallet ${fundWallet.publicKey.toBase58()} to pump wallet ${pumpWalletKeypair.publicKey.toBase58()}`);
       const transferSignature = await transferSol(fundWallet, pumpWalletKeypair.publicKey, transferAmount);
-      await connection.confirmTransaction(transferSignature, "confirmed");
+      await confirmTransaction(transferSignature);
       console.log(`SOL transfer confirmed: ${transferSignature}, transferred ${transferAmount} SOL, leaving ${fundWalletBalance - transferAmount} SOL in fund wallet`);
       fund.pumpPortalTransferCompleted = true;
       await fund.save();
@@ -445,7 +477,7 @@ export const createAndLaunchTokenWithLightning = async (
       console.log(`Transfer already completed or sufficient SOL in Pump wallet: ${pumpWalletBalance} SOL, skipping transfer`);
     }
 
-    const updatedPumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
+    const updatedPumpWalletBalance = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance before creation: ${updatedPumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
     const adjustedSolForCreation = Math.min(totalSolToTransfer - GAS_FEE_RESERVE, updatedPumpWalletBalance - GAS_FEE_RESERVE);
     if (adjustedSolForCreation <= 0) {
@@ -469,17 +501,11 @@ export const createAndLaunchTokenWithLightning = async (
     };
     console.log("Sending create payload to Pump.fun (Lightning):", createPayload);
 
-    const createResponse = await fetch(`https://pumpportal.fun/api/trade?api-key=${apiKey}`, {
+    const createResponse = await fetchWithRetry(`https://pumpportal.fun/api/trade?api-key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(createPayload),
     });
-
-    if (!createResponse.ok) {
-      const errorText = await createResponse.text();
-      console.error(`Pump.fun Lightning API error response: ${errorText}`);
-      throw new Error(`Failed to create token with Lightning API: ${createResponse.statusText} - ${errorText}`);
-    }
 
     const responseData = await createResponse.json();
     const signature = responseData.signature;
@@ -490,27 +516,33 @@ export const createAndLaunchTokenWithLightning = async (
     console.log(`Token mint address: ${tokenAddress}`);
 
     const totalSupply = 1_000_000_000 * 10 ** 6;
-    const pumpWalletBalanceAfter = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
+    const pumpWalletBalanceAfter = await getBalance(pumpWalletKeypair.publicKey);
     console.log(`Pump wallet balance after creation: ${pumpWalletBalanceAfter} SOL`);
 
-    const pumpTokenAccountAddress = await getAssociatedTokenAddress(new PublicKey(tokenAddress), pumpWalletKeypair.publicKey);
-    console.log(`Waiting for ATA to propagate: ${pumpTokenAccountAddress.toBase58()}`);
-    let boughtAmount;
-    for (let attempt = 0; attempt < 5; attempt++) { // Reduced to 5 attempts
+    const pumpTokenAccount = await getOrCreateAssociatedTokenAccount(
+      connection,
+      pumpWalletKeypair,
+      new PublicKey(tokenAddress),
+      pumpWalletKeypair.publicKey
+    );
+    console.log(`Waiting for ATA to propagate: ${pumpTokenAccount.address.toBase58()}`);
+    let boughtAmount: RpcResponseAndContext<TokenAmount> | undefined;
+    const maxAttempts = 5;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccountAddress, "confirmed");
+        boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccount.address, "confirmed");
         if (!boughtAmount || boughtAmount.value.uiAmount === null || boughtAmount.value.uiAmount === 0) {
-          throw new Error(`No tokens received in pump wallet after attempt ${attempt + 1}`);
+          throw new Error(`No tokens received after attempt ${attempt + 1}`);
         }
         console.log(`Tokens received: ${boughtAmount.value.uiAmount} ${tokenSymbol}`);
         break;
       } catch (error) {
-        if (attempt < 4) {
+        if (attempt < maxAttempts - 1) {
           console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 5 seconds...`);
           await new Promise(resolve => setTimeout(resolve, 5000));
           continue;
         }
-        console.error(`Failed to retrieve token balance after 5 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
+        console.error(`Failed to retrieve token balance after ${maxAttempts} attempts:`, error);
         throw new Error("Pump.fun Lightning failed to mint tokens to ATA");
       }
     }
@@ -531,14 +563,14 @@ export const createAndLaunchTokenWithLightning = async (
     await transfer(
       connection,
       pumpWalletKeypair,
-      pumpTokenAccountAddress,
+      pumpTokenAccount.address,
       targetTokenAccount.address,
       pumpWalletKeypair,
       transferAmount
     );
     console.log(`Transferred ${transferAmount / 10 ** 6} ${tokenSymbol} to ${targetWallet.toBase58()}`);
 
-    const pumpWalletBalanceFinal = await connection.getBalance(pumpWalletKeypair.publicKey, "confirmed") / 1_000_000_000;
+    const pumpWalletBalanceFinal = await getBalance(pumpWalletKeypair.publicKey);
     if (pumpWalletBalanceFinal > MIN_EXCESS_THRESHOLD) {
       const websiteWallet = new PublicKey(config.WEBSITE_WALLET);
       await transferSol(pumpWalletKeypair, websiteWallet, pumpWalletBalanceFinal - 0.001);

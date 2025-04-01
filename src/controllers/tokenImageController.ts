@@ -57,40 +57,39 @@ export const uploadTokenImage = asyncHandler(
       return;
     }
 
-    // Delete existing token image if it exists
-    if (fund.image) {
-      try {
+    try {
+      // Delete existing token image if it exists
+      if (fund.image) {
         await cloudinary.uploader.destroy(fund.image);
         console.log(`Deleted old token image with ID: ${fund.image}`);
-      } catch (deleteError) {
-        console.error("Error deleting old token image:", deleteError);
+      }
+
+      // Upload new image to Cloudinary
+      const result = await cloudinary.uploader.upload(req.file.path, {
+        folder: "crowdfund_token_images",
+        public_id: `token_${fundId}_${Date.now()}`,
+        overwrite: true,
+      });
+
+      // Update fund with new image ID
+      fund.image = result.public_id;
+      await fund.save();
+
+      res.status(200).json({
+        message: "Token image uploaded successfully",
+        tokenImageId: result.public_id,
+        url: result.secure_url,
+      });
+    } finally {
+      if (req.file) {
+        try {
+          await fs.unlink(req.file.path);
+          console.log(`Deleted temporary file: ${req.file.path}`);
+        } catch (deleteError) {
+          console.error("Error deleting temporary file:", deleteError);
+        }
       }
     }
-
-    // Upload new image to Cloudinary
-    const result = await cloudinary.uploader.upload(req.file.path, {
-      folder: "crowdfund_token_images",
-      public_id: `token_${fundId}_${Date.now()}`,
-      overwrite: true,
-    });
-
-    // Clean up temporary file
-    try {
-      await fs.unlink(req.file.path);
-      console.log(`Deleted temporary file: ${req.file.path}`);
-    } catch (deleteError) {
-      console.error("Error deleting temporary file:", deleteError);
-    }
-
-    // Update fund with new image ID
-    fund.image = result.public_id;
-    await fund.save();
-
-    res.status(200).json({
-      message: "Token image uploaded successfully",
-      tokenImageId: result.public_id,
-      url: result.secure_url,
-    });
   }
 );
 

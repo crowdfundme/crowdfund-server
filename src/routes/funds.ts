@@ -166,7 +166,7 @@ router.post(
     await fund.save();
     logInfo(`Fund created: ${fund._id}`);
 
-    const websiteBalance = await getBalance(websiteWalletKeypair.publicKey, "confirmed");
+    const websiteBalance = await getBalance(websiteWalletKeypair.publicKey);
     const transferAmount = config.CROWD_FUND_CREATION_FEE * 0.99;
     if (websiteBalance < transferAmount + 0.005) {
       await Fund.findByIdAndDelete(fund._id);
@@ -205,16 +205,26 @@ router.get(
     const query = status ? { status } : {};
     const funds = await Fund.find(query).populate("userId", "walletAddress");
 
-    for (const fund of funds) {
-      logInfo(`Fund ${fund._id} details`, {
-        currentDonatedSol: fund.currentDonatedSol,
-        initialFeePaid: fund.initialFeePaid,
-        status: fund.status,
-      });
-    }
+    const fundsWithBalances = await Promise.all(
+      funds.map(async (fund) => {
+        try {
+          const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
+          return {
+            ...fund.toJSON(),
+            currentBalance: balance,
+          };
+        } catch (error) {
+          logError(`Failed to fetch balance for fund ${fund._id}`, error);
+          return {
+            ...fund.toJSON(),
+            currentBalance: null, // Or handle as needed
+          };
+        }
+      })
+    );
 
-    res.json(funds);
-    logInfo(`Returned ${funds.length} funds`);
+    res.json(fundsWithBalances);
+    logInfo(`Returned ${fundsWithBalances.length} funds`);
   })
 );
 
@@ -278,7 +288,7 @@ router.post(
       await connection.confirmTransaction(txSignature, "confirmed");
       logInfo(`Transaction ${txSignature} confirmed for fund ${id}`);
 
-      const balance = await getBalance(new PublicKey(fund.fundWalletAddress), "confirmed");
+      const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
       const newCurrentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
       logInfo(`Fund ${id} balance after donation`, { balance, currentDonatedSol: newCurrentDonatedSol });
 
