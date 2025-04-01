@@ -1,31 +1,32 @@
 import { Connection, PublicKey, Transaction, Keypair, SystemProgram, Commitment } from "@solana/web3.js";
 import { getConfig } from "../config";
+import { logInfo, logError } from "../utils/logger";
 
-export const getConnection = () => {
-  const config = getConfig();
-  return new Connection(
-    config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT,
-    "confirmed"
-  );
-};
+const config = getConfig();
+const connection = new Connection(
+  config.SOLANA_NETWORK === "mainnet" ? config.SOLANA_RPC_LIVE_ENDPOINT : config.SOLANA_RPC_DEV_ENDPOINT,
+  "confirmed"
+);
+
+export const getConnection = () => connection;
 
 export const generateWallet = () => {
   return Keypair.generate();
 };
 
 export const getBalance = async (publicKey: PublicKey, commitment?: Commitment): Promise<number> => {
-  const connection = getConnection();
   try {
     const balance = await connection.getBalance(publicKey, commitment);
-    return balance / 1_000_000_000; // Convert lamports to SOL
+    const solBalance = balance / 1_000_000_000; // Convert lamports to SOL
+    logInfo(`Fetched balance for ${publicKey.toBase58()}: ${solBalance} SOL`, { commitment });
+    return solBalance;
   } catch (error) {
-    console.error("Error fetching balance:", error);
+    logError(`Error fetching balance for ${publicKey.toBase58()}:`, error);
     return 0;
   }
 };
 
 export const transferSol = async (from: Keypair, to: PublicKey, amount: number) => {
-  const connection = getConnection();
   const lamports = Math.round(amount * 1_000_000_000); // Round to ensure integer lamports
   const transaction = new Transaction().add(
     SystemProgram.transfer({
@@ -40,7 +41,7 @@ export const transferSol = async (from: Keypair, to: PublicKey, amount: number) 
   transaction.feePayer = from.publicKey;
 
   const signature = await connection.sendTransaction(transaction, [from]);
-  console.log(`Transferred ${amount} SOL from ${from.publicKey.toBase58()} to ${to.toBase58()}. Signature: ${signature}`);
+  logInfo(`Transferred ${amount} SOL from ${from.publicKey.toBase58()} to ${to.toBase58()}. Signature: ${signature}`);
   return signature;
 };
 
@@ -50,20 +51,19 @@ export const verifySolPayment = async (
   receiverWallet: string,
   requiredAmount: number
 ): Promise<boolean> => {
-  const connection = getConnection();
   try {
-    console.log("Verifying SOL payment:", { txSignature, senderWallet, receiverWallet, requiredAmount });
+    logInfo("Verifying SOL payment:", { txSignature, senderWallet, receiverWallet, requiredAmount });
     const transaction = await connection.getParsedTransaction(txSignature, {
       commitment: "confirmed",
       maxSupportedTransactionVersion: undefined,
     });
 
     if (!transaction || !transaction.meta) {
-      console.log("Transaction not found or not confirmed yet:", transaction);
+      logInfo("Transaction not found or not confirmed yet:", { txSignature, transaction });
       return false;
     }
 
-    console.log("Transaction instructions:", JSON.stringify(transaction.transaction.message.instructions, null, 2));
+    logInfo("Transaction instructions:", JSON.stringify(transaction.transaction.message.instructions, null, 2));
 
     const transferInstruction = transaction.transaction.message.instructions.find(
       (ix: any) =>
@@ -75,14 +75,14 @@ export const verifySolPayment = async (
     );
 
     if (!transferInstruction) {
-      console.log("No valid SOL transfer found in transaction. Expected conditions not met.");
+      logInfo("No valid SOL transfer found in transaction. Expected conditions not met.");
       return false;
     }
 
-    console.log("SOL payment verified successfully:", JSON.stringify(transferInstruction, null, 2));
+    logInfo("SOL payment verified successfully:", JSON.stringify(transferInstruction, null, 2));
     return true;
   } catch (error) {
-    console.error("Error verifying SOL payment:", error);
+    logError("Error verifying SOL payment:", error);
     return false;
   }
 };

@@ -9,7 +9,7 @@ interface Donation {
     _id: string;
     name: string;
     tokenSymbol: string;
-  };
+  } | null; // Allow fundId to be null
   amount: number;
   donatedAt: Date;
 }
@@ -85,7 +85,7 @@ router.get(
 
     const leaderboard = users
       .map((user) => {
-        const fundDonations = user.donations.filter((d: Donation) => d.fundId._id.toString() === fundId);
+        const fundDonations = user.donations.filter((d: Donation) => d.fundId?._id.toString() === fundId);
         const totalForFund = fundDonations.reduce((sum: number, d: Donation) => sum + d.amount, 0);
         return {
           walletAddress: user.walletAddress,
@@ -123,10 +123,15 @@ router.get(
       email: user.email || null,
       totalDonatedSol: user.totalDonatedSol,
       donations: user.donations.map((donation: Donation) => ({
-        fundId: {
-          name: donation.fundId.name,
-          tokenSymbol: donation.fundId.tokenSymbol,
-        },
+        fundId: donation.fundId
+          ? {
+              name: donation.fundId.name,
+              tokenSymbol: donation.fundId.tokenSymbol,
+            }
+          : {
+              name: "Unknown Fund",
+              tokenSymbol: "N/A",
+            },
         amount: donation.amount,
         donatedAt: donation.donatedAt.toISOString(),
       })),

@@ -70,8 +70,6 @@ export const createAndLaunchToken = async (
   }
 };
 
-
-
 // Real Pump.fun API integration with Cloudinary image (Local Transaction)
 export const createAndLaunchTokenWithApi = async (
   fundWallet: Keypair,
@@ -339,7 +337,7 @@ export const createAndLaunchTokenWithLightning = async (
   imageUrl: string,
   totalSolToTransfer: number,
   fundId: string
-): Promise<{ tokenAddress: string; apiKey: string; walletPublicKey: string; privateKey: string }> => {
+): Promise<{ tokenAddress: string; apiKey: string; walletPublicKey: string; privateKey: string; solscanUrl: string }> => {
   console.log("Running pumpfun.ts version: 2025-03-31 (Lightning Transaction)");
   const connection = getConnection();
   const GAS_FEE_RESERVE = 0.05; // Gas for Pump wallet
@@ -394,6 +392,7 @@ export const createAndLaunchTokenWithLightning = async (
       console.log(`Reusing existing PumpPortal wallet for fund ${fundId}: publicKey=${walletPublicKey}`);
     }
 
+    if (!imageUrl) throw new Error("Image URL is missing");
     let fullImageUrl = imageUrl.startsWith("http") ? imageUrl : `https://res.cloudinary.com/${config.CLOUDINARY_CLOUD_NAME}/image/upload/${imageUrl}`;
     console.log(`Fetching image from: ${fullImageUrl}`);
     const imageResponse = await fetch(fullImageUrl);
@@ -420,12 +419,11 @@ export const createAndLaunchTokenWithLightning = async (
     const pumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
     console.log(`Pump wallet balance before transfer: ${pumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
 
-    // Refined formula: Leave some SOL in fund wallet
     const donatedSol = fund.currentDonatedSol || totalSolToTransfer;
     const buffer = donatedSol * 0.1; // 10% of donated SOL
-    const solForCreation = donatedSol - buffer; // 99% for token creation
-    const requiredPumpSol = solForCreation + GAS_FEE_RESERVE + buffer; // Total for Pump wallet = donatedSol + 0.05 SOL
-    console.log(`Using ${solForCreation} SOL from donations for token creation (99% of ${donatedSol}), required for Pump wallet with gas (${GAS_FEE_RESERVE} SOL) and buffer (${buffer} SOL): ${requiredPumpSol} SOL`);
+    const solForCreation = donatedSol - buffer; // 90% for token creation
+    const requiredPumpSol = solForCreation + GAS_FEE_RESERVE; // Total for Pump wallet
+    console.log(`Using ${solForCreation} SOL from donations for token creation (90% of ${donatedSol}), required for Pump wallet with gas (${GAS_FEE_RESERVE} SOL): ${requiredPumpSol} SOL`);
 
     if (!fund.pumpPortalTransferCompleted && pumpWalletBalance < requiredPumpSol) {
       const fundWalletBalance = await connection.getBalance(fundWallet.publicKey, "finalized") / 1_000_000_000;
@@ -450,8 +448,9 @@ export const createAndLaunchTokenWithLightning = async (
 
     const updatedPumpWalletBalance = await connection.getBalance(pumpWalletKeypair.publicKey, "finalized") / 1_000_000_000;
     console.log(`Pump wallet balance before creation: ${updatedPumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
-    if (updatedPumpWalletBalance < solForCreation + GAS_FEE_RESERVE) {
-      throw new Error(`Insufficient SOL in pump wallet for creation: ${updatedPumpWalletBalance} SOL, need ${solForCreation + GAS_FEE_RESERVE} SOL`);
+    const adjustedSolForCreation = Math.min(totalSolToTransfer - GAS_FEE_RESERVE, updatedPumpWalletBalance - GAS_FEE_RESERVE);
+    if (adjustedSolForCreation <= 0) {
+      throw new Error(`Insufficient SOL in pump wallet for creation: ${updatedPumpWalletBalance} SOL, need ${adjustedSolForCreation + GAS_FEE_RESERVE} SOL`);
     }
 
     const mintKeypair = Keypair.generate();
@@ -464,7 +463,7 @@ export const createAndLaunchTokenWithLightning = async (
       },
       mint: bs58.encode(mintKeypair.secretKey),
       denominatedInSol: "true",
-      amount: solForCreation,
+      amount: adjustedSolForCreation,
       slippage: 10,
       priorityFee: 0.0005,
       pool: "pump",
@@ -485,7 +484,9 @@ export const createAndLaunchTokenWithLightning = async (
 
     const responseData = await createResponse.json();
     const signature = responseData.signature;
-    console.log(`Token created: https://solscan.io/tx/${signature}?cluster=devnet`);
+    const cluster = config.SOLANA_NETWORK === "mainnet" ? "" : "?cluster=devnet";
+    const solscanUrl = `https://solscan.io/tx/${signature}${cluster}`;
+    console.log(`Token created: ${solscanUrl}`);
     const tokenAddress = responseData.mint || mintKeypair.publicKey.toBase58();
     console.log(`Token mint address: ${tokenAddress}`);
 
@@ -501,7 +502,7 @@ export const createAndLaunchTokenWithLightning = async (
     const pumpTokenAccountAddress = await getAssociatedTokenAddress(new PublicKey(tokenAddress), pumpWalletKeypair.publicKey);
     console.log(`Waiting for ATA to propagate: ${pumpTokenAccountAddress.toBase58()}`);
     let boughtAmount;
-    for (let attempt = 0; attempt < 20; attempt++) {
+    for (let attempt = 0; attempt < 10; attempt++) { // Reduced to 10 attempts
       try {
         boughtAmount = await connection.getTokenAccountBalance(pumpTokenAccountAddress, "confirmed");
         if (!boughtAmount || boughtAmount.value.uiAmount === null || boughtAmount.value.uiAmount === 0) {
@@ -510,12 +511,12 @@ export const createAndLaunchTokenWithLightning = async (
         console.log(`Tokens received: ${boughtAmount.value.uiAmount} ${tokenSymbol}`);
         break;
       } catch (error) {
-        if (attempt < 19) {
+        if (attempt < 9) {
           console.log(`Attempt ${attempt + 1}: Waiting for ATA, retrying in 10 seconds...`);
           await new Promise(resolve => setTimeout(resolve, 10000));
           continue;
         }
-        console.error(`Failed to retrieve token balance after 20 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
+        console.error(`Failed to retrieve token balance after 10 attempts: ${error instanceof Error ? error.message : "Unknown error"}`);
         throw new Error("Pump.fun Lightning failed to mint tokens to ATA");
       }
     }
@@ -529,6 +530,10 @@ export const createAndLaunchTokenWithLightning = async (
       targetWallet
     );
     const transferAmount = Math.min(Number(boughtAmount.value.amount), totalSupply * (targetPercentage / 100));
+    const expectedAmount = totalSupply * (targetPercentage / 100);
+    if (transferAmount !== expectedAmount) {
+      console.log(`Token transfer adjusted: expected ${expectedAmount / 10 ** 6}, transferred ${transferAmount / 10 ** 6}`);
+    }
     await transfer(
       connection,
       pumpWalletKeypair,
@@ -553,6 +558,7 @@ export const createAndLaunchTokenWithLightning = async (
       apiKey,
       walletPublicKey,
       privateKey,
+      solscanUrl,
     };
   } catch (error) {
     console.error("Failed to create and launch token with Lightning API:", error);
