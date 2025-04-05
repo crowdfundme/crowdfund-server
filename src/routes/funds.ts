@@ -2,9 +2,9 @@ import express from "express";
 import User from "../models/User";
 import Fund from "../models/Fund";
 import mongoose from "mongoose";
-import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
+import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection, confirmTransaction } from "../utils/solana";
 import { createAndLaunchTokenWithLightning } from "../utils/pumpfun";
-import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection,TransactionMessage } from "@solana/web3.js";
+import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection, TransactionMessage } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
 import { getOrCreateAssociatedTokenAccount, transfer, getAssociatedTokenAddress } from "@solana/spl-token";
@@ -156,7 +156,9 @@ router.post(
     }
 
     const fundWallet = generateWallet();
+    const connection = getConnection();
 
+    // Verify and confirm payment first
     logInfo(`Verifying creation fee payment: ${config.CROWD_FUND_CREATION_FEE} SOL from ${userWallet} to ${websiteWallet.toBase58()}`);
     const paymentValid = await verifySolPayment(
       txSignature,
@@ -176,9 +178,15 @@ router.post(
       });
     }
 
-    const connection = getConnection();
-    await connection.confirmTransaction(txSignature, "confirmed");
-    logInfo(`Creation fee transaction confirmed: ${txSignature}`);
+    const { lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+    try {
+      await confirmTransaction(txSignature, lastValidBlockHeight);
+    } catch (error) {
+      logError(`Failed to confirm user payment transaction ${txSignature}`, error);
+      return res.status(400).json({
+        error: `Failed to confirm payment transaction ${txSignature}. Check Solana Explorer for status.`,
+      });
+    }
 
     const fund = new Fund({
       userId: user._id,
@@ -200,19 +208,21 @@ router.post(
       launchStatus: null,
     });
 
+    const gasReserve = await calculateGasFeeReserve(connection);
+
     try {
-      // Save the fund first
+      // Save fund before transferring SOL
       await fund.save();
       logInfo(`Fund saved: ${fund._id}`);
 
       // Transfer SOL from website wallet to fund wallet
       const websiteBalance = await getBalance(websiteWalletKeypair.publicKey);
-      const transferAmount = config.CROWD_FUND_CREATION_FEE * 0.99;
-      if (websiteBalance < transferAmount + 0.005) {
-        throw new Error(`Insufficient balance in WEBSITE_WALLET: ${websiteBalance} SOL, need ${transferAmount + 0.005} SOL`);
+      const transferAmount = config.CROWD_FUND_CREATION_FEE * 0.99; // 99% to fund wallet      
+      if (websiteBalance < transferAmount + gasReserve) {
+        throw new Error(`Insufficient balance in WEBSITE_WALLET: ${websiteBalance} SOL, need ${transferAmount + gasReserve} SOL`);
       }
 
-      const transferSignature = await transferSol(websiteWalletKeypair, fundWallet.publicKey, transferAmount);
+      const transferSignature = await transferSol(websiteWalletKeypair, fundWallet.publicKey, transferAmount, true);
       logInfo(`Transferred ${transferAmount} SOL from ${websiteWallet.toBase58()} to ${fund.fundWalletAddress}`, { tx: transferSignature });
 
       // Update fund with transferred amount
@@ -225,11 +235,34 @@ router.post(
       });
       logInfo(`Fund creation completed: ${fund._id}`);
     } catch (error: unknown) {
-      // Cleanup if anything fails
-      await Fund.findByIdAndDelete(fund._id);
+      // Refund logic if SOL was deducted but creation failed
+      const refundAmount = config.CROWD_FUND_CREATION_FEE;
+      let refundSignature: string | undefined;
+
+      try {
+        const websiteBalance = await getBalance(websiteWalletKeypair.publicKey);
+        if (websiteBalance >= refundAmount + gasReserve) {
+          refundSignature = await transferSol(websiteWalletKeypair, new PublicKey(userWallet), refundAmount, true);
+          logInfo(`Refunded ${refundAmount} SOL to ${userWallet}`, { tx: refundSignature });
+        } else {
+          logError(`Insufficient balance for refund: ${websiteBalance} SOL, need ${refundAmount + gasReserve} SOL`);
+        }
+      } catch (refundError) {
+        logError(`Failed to refund ${refundAmount} SOL to ${userWallet}`, refundError);
+      }
+
+      // Cleanup
+      if (mongoose.Types.ObjectId.isValid(fund._id)) {
+        await Fund.findByIdAndDelete(fund._id);
+        logInfo(`Deleted fund ${fund._id} due to creation failure`);
+      }
+
       logError(`Fund creation failed`, error);
       const errorMsg = error instanceof Error ? error.message : "Internal server error during fund creation";
-      return res.status(500).json({ error: errorMsg });
+      return res.status(500).json({
+        error: errorMsg,
+        refundSignature: refundSignature || "Refund failed or not attempted",
+      });
     }
   })
 );
@@ -426,7 +459,7 @@ router.post(
           logError(`Insufficient funds for token creation in fund ${id}`, { totalSolToTransfer });
           errorMessage = `Insufficient funds after reserving gas and buffer: ${totalSolToTransfer} SOL`;
           return;
-        }        
+        }
 
         await fund.save();
         logInfo(`Fund ${fund._id} saved as completed`, { status: fund.status });
@@ -508,6 +541,47 @@ router.post(
 
     // If we reach here, something unexpected happened
     throw new Error("Donation processing completed without setting response or error");
+  })
+);
+
+router.post(
+  "/:id/pre-donate",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    const { amount, donorWallet } = req.body;
+
+    logInfo(`POST /funds/${id}/pre-donate - Validating donation`, { amount, donorWallet });
+
+    if (!donorWallet || !amount) {
+      logError(`Missing required fields for fund ${id}`, { donorWallet, amount });
+      return res.status(400).json({ error: "Donor wallet address and amount are required" });
+    }
+
+    if (amount < config.MIN_DONATION || amount > config.MAX_DONATION) {
+      logError(`Invalid donation amount for fund ${id}`, { amount, min: config.MIN_DONATION, max: config.MAX_DONATION });
+      return res.status(400).json({ error: `Donation amount must be between ${config.MIN_DONATION} and ${config.MAX_DONATION} SOL` });
+    }
+
+    const fund = await Fund.findById(id);
+    if (!fund) {
+      logError(`Fund ${id} not found`);
+      return res.status(404).json({ error: "Fund not found" });
+    }
+
+    if (fund.status === "completed") {
+      logInfo(`Pre-donation rejected for fund ${id} - Crowdfund already completed`);
+      return res.status(400).json({ error: "Crowdfund is already completed. No further donations are accepted." });
+    }
+
+    if (fund.initialFeePaid === 0) {
+      logError(`Creation fee not paid for fund ${id}`);
+      return res.status(400).json({ error: "Creation fee not yet paid. Please pay the creation fee first." });
+    }
+
+    res.status(200).json({
+      message: "Donation allowed",
+      fundWalletAddress: fund.fundWalletAddress,
+    });
   })
 );
 
@@ -695,7 +769,7 @@ router.post(
       return res.status(500).json({ error: "Fund wallet public key does not match stored address" });
     }
 
-    
+
     const donatedSol = fund.currentDonatedSol;
     const feeRaiseWallet = fund.initialFeePaid * 0.3;
     const newInitialFeePaid = fund.initialFeePaid - feeRaiseWallet;
