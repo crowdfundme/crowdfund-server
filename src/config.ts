@@ -15,6 +15,7 @@ interface Config {
   CLOUDINARY_API_KEY: string;
   CLOUDINARY_API_SECRET: string;
   SOLANA_RPC_ENDPOINT: string;  
+  MAX_IMAGE_SIZE_MB: number;
 }
 
 export const getConfig = (): Config => {
@@ -48,6 +49,7 @@ export const getConfig = (): Config => {
     CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || "",
     CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || "",
     SOLANA_RPC_ENDPOINT: process.env.SOLANA_RPC_ENDPOINT || "",    
+    MAX_IMAGE_SIZE_MB: Number(process.env.MAX_IMAGE_SIZE_MB) || 25, // Default to 25MB for testing
   };
 
   const requiredVars = [

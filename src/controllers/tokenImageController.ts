@@ -1,4 +1,3 @@
-// src/controllers/tokenImageController.ts
 import { Request, Response, NextFunction } from "express";
 import mongoose from "mongoose";
 import Fund from "../models/Fund";
@@ -35,29 +34,47 @@ interface MulterRequest extends Request {
 // Upload token image
 export const uploadTokenImage = asyncHandler(
   async (req: MulterRequest, res: Response, next: NextFunction): Promise<void> => {
+    console.log("Starting uploadTokenImage for fundId:", req.params.fundId);
+
     if (!req.headers["content-type"]?.startsWith("multipart/form-data")) {
+      console.log("Invalid content-type:", req.headers["content-type"]);
       res.status(400).json({ error: "Expected multipart/form-data" });
       return;
     }
 
     const fundId = req.params.fundId;
     if (!mongoose.Types.ObjectId.isValid(fundId)) {
+      console.log("Invalid fundId:", fundId);
       res.status(400).json({ error: "Invalid fund ID" });
       return;
     }
 
     const fund = await Fund.findById(fundId);
     if (!fund) {
+      console.log("Fund not found for fundId:", fundId);
       res.status(404).json({ error: "Fund not found" });
       return;
     }
 
     if (!req.file) {
+      console.log("No file provided for fundId:", fundId);
       res.status(400).json({ error: "No image file provided" });
       return;
     }
 
     try {
+      // Verify file exists and is readable
+      await fs.access(req.file.path, fs.constants.R_OK);
+      const fileStats = await fs.stat(req.file.path);
+      const fileBuffer = await fs.readFile(req.file.path, { encoding: null });
+      const fileMagic = fileBuffer.toString("hex", 0, 4); // First 4 bytes for MIME check
+      console.log("File verified:", {
+        path: req.file.path,
+        size: fileStats.size,
+        mimeType: req.file.mimetype,
+        magicNumber: fileMagic,
+      });
+
       // Delete existing token image if it exists
       if (fund.image) {
         await cloudinary.uploader.destroy(fund.image);
@@ -70,26 +87,43 @@ export const uploadTokenImage = asyncHandler(
         public_id: `token_${fundId}_${Date.now()}`,
         overwrite: true,
       });
+      console.log("Cloudinary upload successful:", { public_id: result.public_id, url: result.secure_url });
 
       // Update fund with new image ID
       fund.image = result.public_id;
       await fund.save();
+      console.log("Fund updated with new image ID:", fundId);
 
-      res.status(200).json({
+      // Delete temporary file
+      await fs.unlink(req.file.path);
+      console.log(`Deleted temporary file: ${req.file.path}`);
+
+      // Send response
+      const responseData = {
         message: "Token image uploaded successfully",
         tokenImageId: result.public_id,
         url: result.secure_url,
-      });
-    } finally {
+      };
+      console.log("Sending response:", responseData);
+      res.setHeader("Content-Type", "application/json");
+      res.status(200).json(responseData);
+    } catch (error: any) {
+      console.error("Error in uploadTokenImage:", error);
       if (req.file) {
         try {
           await fs.unlink(req.file.path);
-          console.log(`Deleted temporary file: ${req.file.path}`);
+          console.log(`Deleted temporary file after error: ${req.file.path}`);
         } catch (deleteError) {
-          console.error("Error deleting temporary file:", deleteError);
+          console.error("Error deleting temporary file after failure:", deleteError);
         }
       }
+      if (error.http_code === 400) {
+        res.status(400).json({ error: "Invalid image file", details: error.message });
+      } else {
+        res.status(500).json({ error: "Failed to upload image to Cloudinary", details: error.message });
+      }
     }
+    console.log("Finished uploadTokenImage for fundId:", fundId);
   }
 );
 
@@ -118,6 +152,7 @@ export const getTokenImage = asyncHandler(
       transformation: [{ width: 200, height: 200, crop: "fill" }],
     });
 
+    res.setHeader("Content-Type", "application/json");
     res.status(200).json({ tokenImageId: fund.image, url: imageUrl });
   }
 );
@@ -147,6 +182,7 @@ export const deleteTokenImage = asyncHandler(
     fund.image = undefined;
     await fund.save();
 
+    res.setHeader("Content-Type", "application/json");
     res.status(200).json({ message: "Token image deleted successfully" });
   }
 );
