@@ -93,12 +93,47 @@ const calculateGasFeeReserve = async (connection: Connection): Promise<number> =
 };
 
 // Centralized SOL calculation utility  
-  const calculateSolForPump = (donatedSol: number, initialFeePaid: number) => {  
-  const feeRaiseWallet = initialFeePaid * 0.3; // stays in fund wallet
-  const newInitialFeePaid = initialFeePaid - feeRaiseWallet; // Gas fee portion
-  const solForCreation = donatedSol; // Amount for token creation  
-  const totalSolForPump = solForCreation + newInitialFeePaid; // Total to transfer to pump wallet
-  return { solForCreation, totalSolForPump, feeRaiseWallet };
+  /**
+ * Calculates SOL allocations for transferring to the Pump wallet and token creation.
+ * @param donatedSol - Total SOL donated to the fund (e.g., currentDonatedSol).
+ * @param initialFeePaid - Initial fee paid for creating the fund (e.g., 0.1 SOL).
+ * @param targetSol - Target SOL amount for the fund (e.g., 0.3 SOL from targetPercentage).
+ * @returns Object containing SOL amounts for creation, total transfer to Pump wallet, and fee retained in fund wallet.
+ */
+const calculateSolForPump = (
+  donatedSol: number,
+  initialFeePaid: number,
+  targetSol: number
+): { solForCreation: number; totalSolForPump: number; feeRaiseWallet: number } => {
+  // Validate inputs to prevent unexpected behavior
+  if (donatedSol < 0 || initialFeePaid < 0 || targetSol <= 0) {
+    throw new Error(
+      `Invalid input: donatedSol (${donatedSol}), initialFeePaid (${initialFeePaid}), or targetSol (${targetSol}) must be non-negative and targetSol must be positive`
+    );
+  }
+
+  // Portion of initial fee retained in fund wallet (30% of initialFeePaid)
+  const feeRaiseWallet = initialFeePaid * 0.3;
+
+  // Portion of initial fee available for gas fees (70% of initialFeePaid)
+  const gasFeePortion = initialFeePaid - feeRaiseWallet;
+
+  // SOL allocated for token creation, capped at targetSol
+  const solForCreation = Math.min(donatedSol, targetSol);
+
+  // Total SOL to transfer to Pump wallet: creation amount + gas fee portion
+  const totalSolForPump = solForCreation + gasFeePortion;
+
+  // Ensure totalSolForPump is non-negative (though unlikely with valid inputs)
+  if (totalSolForPump < 0) {
+    throw new Error(`Calculated totalSolForPump is negative: ${totalSolForPump}`);
+  }
+
+  return {
+    solForCreation,
+    totalSolForPump,
+    feeRaiseWallet,
+  };
 };
 
 // Main token creation function with Lightning API
@@ -196,8 +231,8 @@ export const createAndLaunchTokenWithLightning = async (
     console.log(`Pump wallet balance before transfer: ${pumpWalletBalance} SOL (pubkey: ${pumpWalletKeypair.publicKey.toBase58()})`);
 
     const donatedSol = fund.currentDonatedSol || totalSolToTransfer;
-    const fundWalletBalance = await getBalance(fundWallet.publicKey);    
-    const { solForCreation, totalSolForPump, feeRaiseWallet } = calculateSolForPump(donatedSol, initialFeePaid);
+    const fundWalletBalance = await getBalance(fundWallet.publicKey);
+    const { solForCreation, totalSolForPump, feeRaiseWallet } = calculateSolForPump(donatedSol, initialFeePaid,targetSol);
     const maxTransfer = fundWalletBalance - feeRaiseWallet;
     console.log(`Using ${solForCreation} SOL for creation and ${initialFeePaid - feeRaiseWallet} SOL for gas, total SOL for pump wallet: ${totalSolForPump} SOL, leaving ${feeRaiseWallet} SOL in fund wallet`);
 
