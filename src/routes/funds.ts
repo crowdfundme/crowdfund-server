@@ -3,8 +3,8 @@ import User from "../models/User";
 import Fund from "../models/Fund";
 import mongoose from "mongoose";
 import { generateWallet, getBalance, transferSol, verifySolPayment, getConnection } from "../utils/solana";
-import { createAndLaunchTokenWithLightning, createAndLaunchTokenWithLightning2 } from "../utils/pumpfun";
-import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { createAndLaunchTokenWithLightning } from "../utils/pumpfun";
+import { PublicKey, Keypair, Transaction, SystemProgram, LAMPORTS_PER_SOL, Connection,TransactionMessage } from "@solana/web3.js";
 import { asyncHandler } from "../utils/asyncHandler";
 import { getConfig } from "../config";
 import { getOrCreateAssociatedTokenAccount, transfer, getAssociatedTokenAddress } from "@solana/spl-token";
@@ -44,6 +44,30 @@ const config = getConfig();
 const websiteWallet = config.WEBSITE_WALLET_KEYPAIR.publicKey;
 const websiteWalletKeypair = config.WEBSITE_WALLET_KEYPAIR;
 
+// Dynamic gas fee calculation
+const calculateGasFeeReserve = async (connection: Connection): Promise<number> => {
+  try {
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
+    const dummyMessage = new TransactionMessage({
+      payerKey: new PublicKey("11111111111111111111111111111111"),
+      recentBlockhash: blockhash,
+      instructions: [],
+    }).compileToV0Message();
+
+    const feeResponse = await connection.getFeeForMessage(dummyMessage, "confirmed");
+    if (!feeResponse.value) {
+      throw new Error("Failed to calculate transaction fee");
+    }
+    return (feeResponse.value * 10) / LAMPORTS_PER_SOL;
+  } catch (error) {
+    console.error("Failed to calculate gas fee reserve:", error);
+    return 0.05; // Fallback
+  }
+};
+
+// URL validation utility
+const isValidUrl = (url: string): boolean => /^(https?:\/\/[^\s$.?#].[^\s]*)$/i.test(url);
+
 router.get(
   "/fee",
   asyncHandler(async (req, res) => {
@@ -64,7 +88,7 @@ router.get(
 router.post(
   "/",
   asyncHandler(async (req, res) => {
-    console.log("Raw request body:", req.body); // Added for debugging
+    console.log("Raw request body:", req.body);
     const {
       userWallet,
       name,
@@ -102,6 +126,19 @@ router.post(
     ) {
       logError(`Missing required fields for fund creation`, req.body);
       return res.status(400).json({ error: "Required fields are missing, including transaction signature" });
+    }
+
+    if (tokenTwitter && !isValidUrl(tokenTwitter)) {
+      logError(`Invalid tokenTwitter URL: ${tokenTwitter}`);
+      return res.status(400).json({ error: "Invalid Twitter URL" });
+    }
+    if (tokenTelegram && !isValidUrl(tokenTelegram)) {
+      logError(`Invalid tokenTelegram URL: ${tokenTelegram}`);
+      return res.status(400).json({ error: "Invalid Telegram URL" });
+    }
+    if (tokenWebsite && !isValidUrl(tokenWebsite)) {
+      logError(`Invalid tokenWebsite URL: ${tokenWebsite}`);
+      return res.status(400).json({ error: "Invalid Website URL" });
     }
 
     const parsedTargetPercentage = Number(targetPercentage);
@@ -146,7 +183,7 @@ router.post(
     const fund = new Fund({
       userId: user._id,
       name,
-      image, // May be undefined if not provided initially
+      image,
       fundWalletAddress: fundWallet.publicKey.toBase58(),
       fundPrivateKey: bs58.default.encode(fundWallet.secretKey),
       tokenName,
@@ -155,37 +192,45 @@ router.post(
       targetPercentage: typedTargetPercentage,
       targetSolAmount: targetSolMap[typedTargetPercentage],
       targetWallet,
-      tokenTwitter,
-      tokenTelegram,
-      tokenWebsite,
+      tokenTwitter: tokenTwitter || "",
+      tokenTelegram: tokenTelegram || "",
+      tokenWebsite: tokenWebsite || "",
       launchFee: config.CROWD_FUND_CREATION_FEE,
       initialFeePaid: 0,
+      launchStatus: null,
     });
 
-    await fund.save();
-    logInfo(`Fund created: ${fund._id}`);
+    try {
+      // Save the fund first
+      await fund.save();
+      logInfo(`Fund saved: ${fund._id}`);
 
-    const websiteBalance = await getBalance(websiteWalletKeypair.publicKey);
-    const transferAmount = config.CROWD_FUND_CREATION_FEE * 0.99;
-    if (websiteBalance < transferAmount + 0.005) {
-      await Fund.findByIdAndDelete(fund._id);
-      logError(`Insufficient balance in WEBSITE_WALLET`, { balance: websiteBalance, required: transferAmount + 0.005 });
-      return res.status(500).json({
-        error: `Insufficient balance in WEBSITE_WALLET: ${websiteBalance} SOL available, need ${transferAmount + 0.005} SOL`,
+      // Transfer SOL from website wallet to fund wallet
+      const websiteBalance = await getBalance(websiteWalletKeypair.publicKey);
+      const transferAmount = config.CROWD_FUND_CREATION_FEE * 0.99;
+      if (websiteBalance < transferAmount + 0.005) {
+        throw new Error(`Insufficient balance in WEBSITE_WALLET: ${websiteBalance} SOL, need ${transferAmount + 0.005} SOL`);
+      }
+
+      const transferSignature = await transferSol(websiteWalletKeypair, fundWallet.publicKey, transferAmount);
+      logInfo(`Transferred ${transferAmount} SOL from ${websiteWallet.toBase58()} to ${fund.fundWalletAddress}`, { tx: transferSignature });
+
+      // Update fund with transferred amount
+      fund.initialFeePaid = transferAmount;
+      await fund.save();
+
+      res.status(201).json({
+        ...fund.toJSON(),
+        message: `Fund created and ${transferAmount} SOL transferred to fund wallet. Transaction signature: ${transferSignature}`,
       });
+      logInfo(`Fund creation completed: ${fund._id}`);
+    } catch (error: unknown) {
+      // Cleanup if anything fails
+      await Fund.findByIdAndDelete(fund._id);
+      logError(`Fund creation failed`, error);
+      const errorMsg = error instanceof Error ? error.message : "Internal server error during fund creation";
+      return res.status(500).json({ error: errorMsg });
     }
-
-    const transferSignature = await transferSol(websiteWalletKeypair, fundWallet.publicKey, transferAmount);
-    logInfo(`Transferred ${transferAmount} SOL from ${websiteWallet.toBase58()} to ${fund.fundWalletAddress}`, { tx: transferSignature });
-
-    fund.initialFeePaid = transferAmount;
-    await fund.save();
-
-    res.status(201).json({
-      ...fund.toJSON(),
-      message: `Fund created and ${transferAmount} SOL transferred to fund wallet. Transaction signature: ${transferSignature}`,
-    });
-    logInfo(`Fund creation completed: ${fund._id}`);
   })
 );
 
@@ -226,8 +271,6 @@ router.get(
       logInfo(`Searching funds with normalized term: "${normalizedSearch}"`);
     }
 
-    logInfo(`Executing Fund.find with query`, { query });
-
     const totalInDb = await Fund.countDocuments(query);
     logInfo(`Total funds in DB matching query`, { total: totalInDb });
 
@@ -239,22 +282,8 @@ router.get(
 
     logInfo(`Fetched funds from DB`, { count: funds.length, page: pageNum, limit: limitNum });
 
-    if (funds.length > limitNum) {
-      logError(`Fetched more funds than limit`, { fetched: funds.length, limit: limitNum });
-    }
-
     const totalFunds = await Fund.countDocuments(query);
     logInfo(`Found ${funds.length} funds of ${totalFunds} total for status=${status}, page=${pageNum}`);
-
-    funds.forEach((fund) => {
-      logInfo(`Fund in response`, {
-        id: fund._id,
-        status: fund.status,
-        currentDonatedSol: fund.currentDonatedSol,
-        targetSolAmount: fund.targetSolAmount,
-        completedAt: fund.completedAt,
-      });
-    });
 
     const fundsWithBalances = await Promise.all(
       funds.map(async (fund) => {
@@ -297,33 +326,48 @@ router.post(
     const donationQueue = await getDonationQueue();
     logInfo(`Queue size before adding donation: ${donationQueue.size}`);
 
-    await donationQueue.add(async () => {
-      const GAS_FEE_RESERVE = 0.05;
+    let fund: InstanceType<typeof Fund> | null = null;
+    let responseData: any = null;
+    let errorMessage: string | null = null;
+
+    // Add the task to the queue and handle it as void
+    await donationQueue.add(async (): Promise<void> => {
       const connection = getConnection();
+      const GAS_FEE_RESERVE = await calculateGasFeeReserve(connection);
 
       if (!donorWallet || !txSignature) {
         logError(`Missing required fields for fund ${id}`, { donorWallet, txSignature });
-        res.status(400).json({ error: "Donor wallet address and transaction signature are required" });
+        errorMessage = "Donor wallet address and transaction signature are required";
         return;
       }
 
       if (amount < config.MIN_DONATION || amount > config.MAX_DONATION) {
         logError(`Invalid donation amount for fund ${id}`, { amount, min: config.MIN_DONATION, max: config.MAX_DONATION });
-        res.status(400).json({
-          error: `Donation amount must be between ${config.MIN_DONATION} and ${config.MAX_DONATION} SOL`,
-        });
+        errorMessage = `Donation amount must be between ${config.MIN_DONATION} and ${config.MAX_DONATION} SOL`;
         return;
       }
 
-      const fund = await Fund.findById(id);
-      if (!fund || fund.status === "completed") {
-        logError(`Invalid fund ${id}`, { fundExists: !!fund, status: fund?.status });
-        res.status(400).json({ error: "Invalid fund" });
+      fund = await Fund.findById(id);
+      if (!fund) {
+        logError(`Fund ${id} not found`);
+        errorMessage = "Invalid fund";
         return;
       }
+
+      // Check if the crowdfund is already completed
+      if (fund.status === "completed") {
+        logInfo(`Donation rejected for fund ${id} - Crowdfund already completed`, {
+          donorWallet,
+          amount,
+          txSignature,
+        });
+        errorMessage = "Crowdfund is already completed. No further donations are accepted.";
+        return;
+      }
+
       if (fund.initialFeePaid === 0) {
         logError(`Creation fee not paid for fund ${id}`);
-        res.status(400).json({ error: "Creation fee not yet paid. Please pay the creation fee first." });
+        errorMessage = "Creation fee not yet paid. Please pay the creation fee first.";
         return;
       }
 
@@ -336,9 +380,7 @@ router.post(
           fundWalletAddress: fund.fundWalletAddress,
           amount,
         });
-        res.status(400).json({
-          error: `Transaction does not contain valid SOL transfer of ${amount} SOL from ${donorWallet} to ${fund.fundWalletAddress}`,
-        });
+        errorMessage = `Transaction does not contain valid SOL transfer of ${amount} SOL from ${donorWallet} to ${fund.fundWalletAddress}`;
         return;
       }
 
@@ -348,67 +390,73 @@ router.post(
 
       const balance = await getBalance(new PublicKey(fund.fundWalletAddress));
       const newCurrentDonatedSol = Math.max(0, balance - fund.initialFeePaid);
-      logInfo(`Fund ${id} balance after donation`, { balance, currentDonatedSol: newCurrentDonatedSol });
-
       fund.currentDonatedSol = newCurrentDonatedSol;
 
-      let donor = await User.findOne({ walletAddress: donorWallet });
-      if (!donor) {
-        donor = new User({ walletAddress: donorWallet });
-      }
-      donor.donations.push({
-        fundId: fund._id,
-        amount,
-        donatedAt: new Date(),
-      });
-      donor.totalDonatedSol = (donor.totalDonatedSol || 0) + amount;
-      await donor.save();
+      const donor = await User.findOneAndUpdate(
+        { walletAddress: donorWallet },
+        {
+          $push: { donations: { fundId: fund._id, amount, donatedAt: new Date() } },
+          $inc: { totalDonatedSol: amount },
+        },
+        { upsert: true, new: true }
+      );
       logInfo(`Updated donor ${donorWallet} for fund ${id}`, { totalDonatedSol: donor.totalDonatedSol });
 
       const totalTarget = fund.targetSolAmount;
-      let responseSent = false;
       if (fund.currentDonatedSol >= totalTarget) {
         fund.status = "completed";
         fund.completedAt = new Date();
-        logInfo(`Fund ${fund._id} reached target`, { currentDonatedSol: fund.currentDonatedSol, target: totalTarget });
+        fund.launchStatus = "pending";
 
         const expectedBalance = fund.initialFeePaid + fund.currentDonatedSol;
-        if (balance < expectedBalance - 0.005) {
+        if (balance < expectedBalance - GAS_FEE_RESERVE) {
           logError(`Balance mismatch for fund ${id}`, { actual: balance, expected: expectedBalance });
-          throw new Error(`Fund wallet balance (${balance} SOL) is less than expected (${expectedBalance} SOL)`);
-        } else if (balance < expectedBalance) {
-          logInfo(`Minor balance discrepancy for fund ${id}`, { actual: balance, expected: expectedBalance });
+          errorMessage = `Fund wallet balance (${balance} SOL) is less than expected (${expectedBalance} SOL)`;
+          return;
         }
 
-        const fundWallet = Keypair.fromSecretKey(bs58.default.decode(fund.fundPrivateKey));
         const donatedSol = fund.currentDonatedSol;
-        const buffer = donatedSol * 0.1;
-        const totalSolToTransfer = donatedSol + fund.initialFeePaid - buffer - GAS_FEE_RESERVE;
+        const feeRaiseWallet = fund.initialFeePaid * 0.3;
+        const newInitialFeePaid = fund.initialFeePaid - feeRaiseWallet;
+        const buffer = donatedSol * 0.01;
+        const solForCreation = donatedSol - buffer;
+        const totalSolToTransfer = solForCreation + newInitialFeePaid;
+
         if (totalSolToTransfer <= 0) {
           logError(`Insufficient funds for token creation in fund ${id}`, { totalSolToTransfer });
-          throw new Error(`Insufficient funds after reserving gas and buffer: ${totalSolToTransfer} SOL`);
-        }
+          errorMessage = `Insufficient funds after reserving gas and buffer: ${totalSolToTransfer} SOL`;
+          return;
+        }        
 
         await fund.save();
         logInfo(`Fund ${fund._id} saved as completed`, { status: fund.status });
+        logInfo(`Fund ${fund._id} donatedSol`, { donatedSol: donatedSol });
+        logInfo(`Fund ${fund._id} feeRaiseWallet`, { feeRaiseWallet: feeRaiseWallet });
+        logInfo(`Fund ${fund._id} newInitialFeePaid`, { newInitialFeePaid: newInitialFeePaid });
+        logInfo(`Fund ${fund._id} buffer`, { buffer: buffer });
+        logInfo(`Fund ${fund._id} solForCreation`, { solForCreation: solForCreation });
+        logInfo(`Fund ${fund._id} totalSolToTransfer`, { totalSolToTransfer: totalSolToTransfer });
 
-        res.json({ ...fund.toJSON(), signature: txSignature });
-        responseSent = true;
 
+        responseData = { ...fund.toJSON(), signature: txSignature };
+
+        // Launch token creation in the background
         setImmediate(async () => {
           try {
             const updatedFund = await Fund.findById(id);
             if (!updatedFund) {
-              logError(`Fund ${id} not found during token prep`);
+              logError(`Fund ${id} not found during token launch`);
               return;
             }
             if (!updatedFund.image) {
-              logError(`No image provided for fund ${id} during automatic token prep`);
+              logError(`No image provided for fund ${id} during automatic token launch`);
               updatedFund.launchError = "Image is required for token creation on Pump.fun";
+              updatedFund.launchStatus = "failed";
               await updatedFund.save();
               return;
             }
-            const { apiKey, walletPublicKey, privateKey, metadataUri } = await createAndLaunchTokenWithLightning2(
+
+            const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl, metadataUri } = await createAndLaunchTokenWithLightning(
               Keypair.fromSecretKey(bs58.default.decode(updatedFund.fundPrivateKey)),
               updatedFund.tokenName,
               updatedFund.tokenSymbol,
@@ -420,18 +468,23 @@ router.post(
               totalSolToTransfer,
               updatedFund._id.toString()
             );
+
+            updatedFund.tokenAddress = tokenAddress;
             updatedFund.pumpPortalApiKey = apiKey;
             updatedFund.pumpPortalWalletPublicKey = walletPublicKey;
             updatedFund.pumpPortalPrivateKey = privateKey;
+            updatedFund.solscanUrl = solscanUrl;
             updatedFund.metadataUri = metadataUri;
             updatedFund.launchError = null;
+            updatedFund.launchStatus = "completed";
             await updatedFund.save();
-            logInfo(`Token launch prepared for fund ${id}`, { metadataUri, status: updatedFund.status });
+            logInfo(`Token launched for fund ${id}`, { tokenAddress, solscanUrl });
           } catch (error: unknown) {
-            logError(`Token preparation failed for fund ${id}`, error);
+            logError(`Token launch failed for fund ${id}`, error);
             const updatedFund = await Fund.findById(id);
             if (updatedFund) {
-              updatedFund.launchError = error instanceof Error ? error.message : "Unknown error during token preparation";
+              updatedFund.launchError = error instanceof Error ? error.message : "Unknown error during token launch";
+              updatedFund.launchStatus = "failed";
               await updatedFund.save();
               logInfo(`Fund ${id} after error`, { status: updatedFund.status });
             }
@@ -440,13 +493,21 @@ router.post(
       } else {
         await fund.save();
         logInfo(`Fund ${id} updated with donation`, { status: fund.status });
-      }
-
-      if (!responseSent) {
-        res.json({ ...fund.toJSON(), signature: txSignature });
-        logInfo(`Donation processed successfully for fund ${id}`, { status: fund.status });
+        responseData = { ...fund.toJSON(), signature: txSignature };
       }
     });
+
+    // Handle the response outside the queue
+    if (errorMessage) {
+      return res.status(400).json({ error: errorMessage });
+    }
+    if (responseData) {
+      logInfo(`Donation processed successfully for fund ${id}`, { status: fund?.status });
+      return res.json(responseData);
+    }
+
+    // If we reach here, something unexpected happened
+    throw new Error("Donation processing completed without setting response or error");
   })
 );
 
@@ -488,6 +549,13 @@ router.post(
     const pumpWalletKeypair = Keypair.fromSecretKey(bs58.default.decode(fund.pumpPortalPrivateKey));
     const tokenMint = new PublicKey(fund.tokenAddress);
     const targetWallet = new PublicKey(fund.targetWallet);
+
+    const pumpWalletBalance = await getBalance(pumpWalletKeypair.publicKey);
+    const GAS_FEE_RESERVE = await calculateGasFeeReserve(connection);
+    if (pumpWalletBalance < GAS_FEE_RESERVE) {
+      logError(`Insufficient SOL for gas in pump wallet for fund ${id}`, { balance: pumpWalletBalance, required: GAS_FEE_RESERVE });
+      return res.status(400).json({ error: `Insufficient SOL for gas fees in pump wallet: ${pumpWalletBalance} SOL, need ${GAS_FEE_RESERVE} SOL` });
+    }
 
     const pumpTokenAccountAddress = await getAssociatedTokenAddress(tokenMint, pumpWalletKeypair.publicKey);
     const targetTokenAccountAddress = await getAssociatedTokenAddress(tokenMint, targetWallet);
@@ -611,29 +679,12 @@ router.post(
       return res.status(500).json({ error: "Fund private key is missing or invalid" });
     }
 
-    console.log("Fund private key from DB:", fund.fundPrivateKey);
     let fundWallet: Keypair;
     try {
       fundWallet = Keypair.fromSecretKey(bs58.default.decode(fund.fundPrivateKey));
-      console.log("Decoded as Base58, public key:", fundWallet.publicKey.toBase58());
-    } catch (base58Error) {
-      logInfo(`Base58 decode failed for fund ${id}, attempting split format`, base58Error);
-      try {
-        if (fund.fundPrivateKey.includes(",")) {
-          const privateKeyArray = fund.fundPrivateKey.split(",").map(Number);
-          fundWallet = Keypair.fromSecretKey(Uint8Array.from(privateKeyArray));
-          console.log("Decoded as split array, public key:", fundWallet.publicKey.toBase58());
-          const base58PrivateKey = bs58.default.encode(fundWallet.secretKey);
-          fund.fundPrivateKey = base58PrivateKey;
-          await fund.save();
-          logInfo(`Migrated fund ${id} private key to Base58 format`);
-        } else {
-          throw new Error("Neither Base58 nor split format worked");
-        }
-      } catch (splitError) {
-        logError(`Failed to decode fundPrivateKey for fund ${id}`, { base58Error, splitError });
-        return res.status(500).json({ error: "Invalid fund private key format" });
-      }
+    } catch (error) {
+      logError(`Failed to decode fundPrivateKey for fund ${id}`, error);
+      return res.status(500).json({ error: "Invalid fund private key format" });
     }
 
     if (fundWallet.publicKey.toBase58() !== fund.fundWalletAddress) {
@@ -644,14 +695,18 @@ router.post(
       return res.status(500).json({ error: "Fund wallet public key does not match stored address" });
     }
 
-    const totalSolToTransfer = fund.initialFeePaid + fund.currentDonatedSol - 0.05;
-    if (totalSolToTransfer <= 0) {
-      logError(`Insufficient funds for token launch in fund ${id}`, { totalSolToTransfer });
-      return res.status(400).json({ error: `Insufficient funds after reserving gas: ${totalSolToTransfer} SOL` });
-    }
+    
+    const donatedSol = fund.currentDonatedSol;
+    const feeRaiseWallet = fund.initialFeePaid * 0.3;
+    const newInitialFeePaid = fund.initialFeePaid - feeRaiseWallet;
+    const solForCreation = donatedSol; // Amount for token creation
+    const totalSolToTransfer = solForCreation + newInitialFeePaid;
 
     try {
-      const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl } = await createAndLaunchTokenWithLightning(
+      fund.launchStatus = "pending";
+      await fund.save();
+
+      const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl, metadataUri } = await createAndLaunchTokenWithLightning(
         fundWallet,
         fund.tokenName,
         fund.tokenSymbol,
@@ -669,9 +724,12 @@ router.post(
       fund.pumpPortalWalletPublicKey = walletPublicKey;
       fund.pumpPortalPrivateKey = privateKey;
       fund.solscanUrl = solscanUrl;
-      logInfo(`Token launched for fund ${id}`, { tokenAddress, solscanUrl });
+      fund.metadataUri = metadataUri;
       fund.launchError = null;
+      fund.launchStatus = "completed";
       await fund.save();
+
+      logInfo(`Token launched for fund ${id}`, { tokenAddress, solscanUrl });
 
       res.json({
         message: `Token launched successfully`,
@@ -681,6 +739,7 @@ router.post(
     } catch (error: unknown) {
       logError(`Manual token creation failed for fund ${id}`, error);
       fund.launchError = error instanceof Error ? error.message : "Unknown error during manual token creation";
+      fund.launchStatus = "failed";
       await fund.save();
       return res.status(500).json({ error: fund.launchError });
     }
@@ -713,6 +772,31 @@ router.get(
 
     res.json(fundData);
     logInfo(`Returned fund details for ${id}`, { fundId: id, status: fund.status });
+  })
+);
+
+// Add this after the existing routes in routes/funds.ts
+router.get(
+  "/:id/status",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    logInfo(`GET /funds/${id}/status - Checking fund status`, { id });
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      logError(`Invalid fund ID: ${id}`);
+      return res.status(400).json({ error: "Invalid fund ID" });
+    }
+
+    const fund = await Fund.findById(id);
+    if (!fund) {
+      logError(`Fund ${id} not found`);
+      return res.status(404).json({ error: `Fund with ID ${id} not found` });
+    }
+
+    const isCompleted = fund.status === "completed";
+    logInfo(`Fund ${id} status checked`, { status: fund.status, isCompleted });
+
+    res.json({ isCompleted });
   })
 );
 

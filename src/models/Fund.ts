@@ -32,6 +32,7 @@ const FundSchema = new Schema(
     launchError: { type: String },
     tokenCa: { type: String },
     solscanUrl: { type: String, required: false },
+    metadataUri: { type: String, required: false },
   },
   { timestamps: true }
 );
