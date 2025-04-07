@@ -14,7 +14,9 @@ interface Config {
   CLOUDINARY_CLOUD_NAME: string;
   CLOUDINARY_API_KEY: string;
   CLOUDINARY_API_SECRET: string;
-  SOLANA_RPC_ENDPOINT: string;  
+  SOLANA_RPC_ENDPOINT: string;    
+  FRONTEND_URL: string;
+  API_KEY: string;
   MAX_IMAGE_SIZE_MB: number;
 }
 
@@ -48,7 +50,9 @@ export const getConfig = (): Config => {
     CLOUDINARY_CLOUD_NAME: process.env.CLOUDINARY_CLOUD_NAME || "",
     CLOUDINARY_API_KEY: process.env.CLOUDINARY_API_KEY || "",
     CLOUDINARY_API_SECRET: process.env.CLOUDINARY_API_SECRET || "",
-    SOLANA_RPC_ENDPOINT: process.env.SOLANA_RPC_ENDPOINT || "",    
+    SOLANA_RPC_ENDPOINT: process.env.SOLANA_RPC_ENDPOINT || "",
+    FRONTEND_URL: process.env.FRONTEND_URL || "",
+    API_KEY: process.env.API_KEY || "",
     MAX_IMAGE_SIZE_MB: Number(process.env.MAX_IMAGE_SIZE_MB) || 25, // Default to 25MB for testing
   };
 
@@ -58,7 +62,9 @@ export const getConfig = (): Config => {
     "CLOUDINARY_CLOUD_NAME",
     "CLOUDINARY_API_KEY",
     "CLOUDINARY_API_SECRET",
-    "SOLANA_RPC_ENDPOINT",    
+    "SOLANA_RPC_ENDPOINT",
+    "FRONTEND_URL",
+    "API_KEY",
   ];
   for (const varName of requiredVars) {
     if (!config[varName as keyof Config]) {

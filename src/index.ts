@@ -2,8 +2,10 @@ import express from "express";
 import mongoose from "mongoose";
 import fundRoutes from "./routes/funds";
 import userRoutes from "./routes/users";
+import utilityRoutes from "./routes/utilityRoutes";
 import tokenImageRoutes from "./routes/tokenImageRoutes";
 import cors from "cors";
+import corsMiddleware from "./middleware/cors";
 import rateLimit from "express-rate-limit";
 import { getConfig } from "./config";
 import "./env";
@@ -22,34 +24,55 @@ console.log("Loaded configuration in index.ts:", {
   CLOUDINARY_API_KEY: config.CLOUDINARY_API_KEY,
   CLOUDINARY_API_SECRET: config.CLOUDINARY_API_SECRET ? "[hidden]" : undefined,
   SOLANA_RPC_ENDPOINT: config.SOLANA_RPC_ENDPOINT,
+  FRONTEND_URL: config.FRONTEND_URL,
+  API_KEY: config.API_KEY,
 });
 
 const app = express();
-
-// CORS setup
-app.use(cors({
-  origin: "http://localhost:3000",
-  methods: ["GET", "POST", "PUT", "DELETE"],
-  allowedHeaders: ["Content-Type"],
-}));
+const API_KEY = config.API_KEY || "your-secure-api-key-here";
 
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 1000, // Limit each IP to 1000 requests per window
   message: "Too many requests from this IP, please try again later.",
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.headers["X-From-Vercel"] === "true",
 });
+
+const apiKeyMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const apiKey = req.headers["x-api-key"];
+  if (apiKey === API_KEY) {
+    next();
+  } else {
+    res.status(401).json({ error: "Unauthorized: Invalid or missing API key" });
+  }
+};
+
 app.use(limiter);
+app.use(corsMiddleware);
+app.use(apiKeyMiddleware);
 
 // Routes with JSON parsing
 app.use("/api/funds", express.json({ limit: "10mb" }), fundRoutes);
 app.use("/api/users", express.json({ limit: "10mb" }), userRoutes);
+app.use("/api/utility", express.json({ limit: "10mb" }), utilityRoutes);
 
 // Route with Multer (no JSON parsing)
 app.use("/api/token-images", tokenImageRoutes);
 
 // Optional: Middleware for parsing large URL-encoded payloads (if needed elsewhere)
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+app.get("/", (req, res) => {
+  res.send("CrowdFund.Fun Server is live!");
+});
+
+app.get("/status", (req, res) => {
+  const isLive = true; // Add any additional health checks here if needed
+  res.status(200).json({ isLive });
+});
 
 // Custom error middleware to ensure JSON responses
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
