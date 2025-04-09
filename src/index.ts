@@ -66,7 +66,7 @@ app.use("/api/token-images", tokenImageRoutes);
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 app.get("/api/test", (req, res) => {
-  res.send("CrowdFund.Fun Server is live!");
+  res.send(`CrowdFund.Fun Server is live! Endpoint: ${config.SOLANA_RPC_ENDPOINT}`);
 });
 
 app.get("/api/status", (req, res) => {
