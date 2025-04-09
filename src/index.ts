@@ -62,7 +62,7 @@ app.use("/api/utility", express.json({ limit: "10mb" }), utilityRoutes);
 // Route with Multer (no JSON parsing)
 app.use("/api/token-images", tokenImageRoutes);
 
-// Optional: Middleware for parsing large URL-encoded payloads (if needed elsewhere)
+// Optional: Middleware for parsing large URL-encoded payloads
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 app.get("/api", (req, res) => {
@@ -78,7 +78,7 @@ app.get("/api/status", (req, res) => {
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("Error middleware caught:", err);
   if (res.headersSent) {
-    return next(err); // Pass to default handler if headers already sent
+    return next(err);
   }
   res.setHeader("Content-Type", "application/json");
   res.status(err.status || 500).json({
@@ -90,8 +90,15 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // MongoDB connection with limited retries
 const MAX_RETRIES = 5;
 let retryCount = 0;
+let isConnecting = false; // Prevent multiple concurrent connection attempts
 
 const connectDB = async () => {
+  if (isConnecting) {
+    console.log("Connection attempt already in progress, skipping...");
+    return;
+  }
+
+  isConnecting = true;
   try {
     await mongoose.connect(config.MONGO_URI, {
       serverSelectionTimeoutMS: 5000, // Timeout after 5s if no server found
@@ -99,19 +106,26 @@ const connectDB = async () => {
       maxPoolSize: 10, // Limit connection pool
       retryWrites: true,
       w: "majority",
+      // Explicitly disable Mongoose's built-in reconnection
+      bufferCommands: false, // Disable command buffering during disconnects
     });
     console.log("MongoDB connected successfully");
-    retryCount = 0; // Reset retry count on success
+    retryCount = 0; // Reset on success
   } catch (err) {
     console.error("MongoDB connection error:", err);
     if (retryCount < MAX_RETRIES) {
       retryCount++;
       console.log(`Retrying connection (${retryCount}/${MAX_RETRIES}) in 5 seconds...`);
-      setTimeout(connectDB, 5000);
+      setTimeout(() => {
+        isConnecting = false; // Allow next attempt
+        connectDB();
+      }, 5000);
     } else {
       console.error("Max retries reached. Shutting down server.");
-      process.exit(1); // Exit process if max retries exceeded
+      process.exit(1);
     }
+  } finally {
+    isConnecting = false; // Reset flag after attempt
   }
 };
 
@@ -122,12 +136,7 @@ mongoose.connection.on("connected", () => {
 
 mongoose.connection.on("disconnected", () => {
   console.warn("MongoDB disconnected");
-  // Only attempt reconnect if we haven't hit max retries
-  if (retryCount < MAX_RETRIES) {
-    connectDB();
-  } else {
-    console.error("Not retrying due to max retries reached.");
-  }
+  // Only log, don’t automatically retry here to avoid loop
 });
 
 mongoose.connection.on("error", (err) => {
