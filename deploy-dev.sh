@@ -36,12 +36,11 @@ if pm2 list | grep -q "$PM2_PROCESS_NAME"; then
   pm2 restart "$PM2_PROCESS_NAME" --update-env || { echo "Restart failed"; exit 1; }
 else
   echo "Process $PM2_PROCESS_NAME not found, starting it..."
-  pm2 start "pnpm" --name "$PM2_PROCESS_NAME" --interpreter bash -- serve:dev || { echo "PM2 start failed"; exit 1; }
+  # Corrected: Run the built file directly instead of invoking pnpm
+  pm2 start "$APP_DIR/dist/index.js" --name "$PM2_PROCESS_NAME" \
+    --restart-delay 5000 --max-restarts 10 \
+    --env NODE_ENV=development || { echo "PM2 start failed"; exit 1; }
 fi
-
-# Configure auto-restart
-echo "Configuring auto-restart for $PM2_PROCESS_NAME..."
-pm2 modify "$PM2_PROCESS_NAME" --restart-delay 5000 --max-restarts 10
 
 # Save PM2 config to persist across reboots
 echo "Saving PM2 configuration..."
