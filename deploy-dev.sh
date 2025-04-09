@@ -29,7 +29,11 @@ pnpm clean || { echo "pnpm clean failed"; exit 1; }
 echo "Building application..."
 pnpm build || { echo "Build failed"; exit 1; }
 
-# Step 4: Serve in development with PM2
+# Set NODE_ENV explicitly before PM2
+export NODE_ENV=development
+echo "NODE_ENV set to: $NODE_ENV"
+
+# Step 4: Serve in production with PM2
 echo "Checking PM2 process: $PM2_PROCESS_NAME"
 if pm2 list | grep -q "$PM2_PROCESS_NAME"; then
   echo "Process $PM2_PROCESS_NAME found, restarting..."
@@ -39,8 +43,7 @@ else
   pm2 start "node" --name "$PM2_PROCESS_NAME" \
     --interpreter none \
     -- --require "$APP_DIR/dist/env.js" "$APP_DIR/dist/index.js" \
-    --restart-delay 5000 --max-restarts 10 \
-    --env NODE_ENV=development || { echo "PM2 start failed"; exit 1; }
+    --restart-delay 5000 --max-restarts 10 || { echo "PM2 start failed"; exit 1; }
 fi
 
 # Save PM2 config to persist across reboots

@@ -1,10 +1,10 @@
-// src/env.ts
 import dotenv from "dotenv";
 import path from "path";
 
+console.log("NODE_ENV before anything:", process.env.NODE_ENV); // Add this
 const env = process.env.NODE_ENV || "development";
 const dotenvFile = env === "production" ? ".env.production" : ".env";
-const dotenvPath = path.resolve(process.cwd(), dotenvFile); // Use cwd for root directory
+const dotenvPath = path.resolve(process.cwd(), dotenvFile);
 const result = dotenv.config({ path: dotenvPath });
 
 if (result.error) {
