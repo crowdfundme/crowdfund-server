@@ -29,15 +29,16 @@ pnpm clean || { echo "pnpm clean failed"; exit 1; }
 echo "Building application..."
 pnpm build || { echo "Build failed"; exit 1; }
 
-# Step 4: Serve in production with PM2
+# Step 4: Serve in development with PM2
 echo "Checking PM2 process: $PM2_PROCESS_NAME"
 if pm2 list | grep -q "$PM2_PROCESS_NAME"; then
   echo "Process $PM2_PROCESS_NAME found, restarting..."
   pm2 restart "$PM2_PROCESS_NAME" --update-env || { echo "Restart failed"; exit 1; }
 else
   echo "Process $PM2_PROCESS_NAME not found, starting it..."
-  # Corrected: Run the built file directly instead of invoking pnpm
-  pm2 start "$APP_DIR/dist/index.js" --name "$PM2_PROCESS_NAME" \
+  pm2 start "node" --name "$PM2_PROCESS_NAME" \
+    --interpreter none \
+    -- --require "$APP_DIR/dist/env.js" "$APP_DIR/dist/index.js" \
     --restart-delay 5000 --max-restarts 10 \
     --env NODE_ENV=development || { echo "PM2 start failed"; exit 1; }
 fi
