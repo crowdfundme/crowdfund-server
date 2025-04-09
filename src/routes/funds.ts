@@ -470,7 +470,6 @@ router.post(
         logInfo(`Fund ${fund._id} solForCreation`, { solForCreation: solForCreation });
         logInfo(`Fund ${fund._id} totalSolToTransfer`, { totalSolToTransfer: totalSolToTransfer });
 
-
         responseData = { ...fund.toJSON(), signature: txSignature };
 
         // Launch token creation in the background
@@ -769,54 +768,67 @@ router.post(
       return res.status(500).json({ error: "Fund wallet public key does not match stored address" });
     }
 
-
     const donatedSol = fund.currentDonatedSol;
     const feeRaiseWallet = fund.initialFeePaid * 0.3;
     const newInitialFeePaid = fund.initialFeePaid - feeRaiseWallet;
     const solForCreation = donatedSol; // Amount for token creation
     const totalSolToTransfer = solForCreation + newInitialFeePaid;
 
-    try {
-      fund.launchStatus = "pending";
-      await fund.save();
+    // Set launchStatus to "pending" and save immediately
+    fund.launchStatus = "pending";
+    await fund.save();
+    logInfo(`Fund ${id} marked as pending launch`);
 
-      const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl, metadataUri } = await createAndLaunchTokenWithLightning(
-        fundWallet,
-        fund.tokenName,
-        fund.tokenSymbol,
-        fund.targetSolAmount,
-        new PublicKey(fund.targetWallet),
-        fund.initialFeePaid,
-        fund.targetPercentage,
-        fund.image,
-        totalSolToTransfer,
-        fund._id.toString()
-      );
+    // Return early with a "pending" response
+    res.status(202).json({
+      message: "Token launch request accepted and processing in the background",
+      status: "pending",
+    });
 
-      fund.tokenAddress = tokenAddress;
-      fund.pumpPortalApiKey = apiKey;
-      fund.pumpPortalWalletPublicKey = walletPublicKey;
-      fund.pumpPortalPrivateKey = privateKey;
-      fund.solscanUrl = solscanUrl;
-      fund.metadataUri = metadataUri;
-      fund.launchError = null;
-      fund.launchStatus = "completed";
-      await fund.save();
+    // Process the token launch in the background
+    setImmediate(async () => {
+      try {
+        const updatedFund = await Fund.findById(id);
+        if (!updatedFund) {
+          logError(`Fund ${id} not found during background token launch`);
+          return;
+        }
 
-      logInfo(`Token launched for fund ${id}`, { tokenAddress, solscanUrl });
+        const { tokenAddress, apiKey, walletPublicKey, privateKey, solscanUrl, metadataUri } = await createAndLaunchTokenWithLightning(
+          fundWallet,
+          updatedFund.tokenName,
+          updatedFund.tokenSymbol,
+          updatedFund.targetSolAmount,
+          new PublicKey(updatedFund.targetWallet),
+          updatedFund.initialFeePaid,
+          updatedFund.targetPercentage,
+          updatedFund.image,
+          totalSolToTransfer,
+          updatedFund._id.toString()
+        );
 
-      res.json({
-        message: `Token launched successfully`,
-        tokenAddress,
-        signature: solscanUrl,
-      });
-    } catch (error: unknown) {
-      logError(`Manual token creation failed for fund ${id}`, error);
-      fund.launchError = error instanceof Error ? error.message : "Unknown error during manual token creation";
-      fund.launchStatus = "failed";
-      await fund.save();
-      return res.status(500).json({ error: fund.launchError });
-    }
+        updatedFund.tokenAddress = tokenAddress;
+        updatedFund.pumpPortalApiKey = apiKey;
+        updatedFund.pumpPortalWalletPublicKey = walletPublicKey;
+        updatedFund.pumpPortalPrivateKey = privateKey;
+        updatedFund.solscanUrl = solscanUrl;
+        updatedFund.metadataUri = metadataUri;
+        updatedFund.launchError = null;
+        updatedFund.launchStatus = "completed";
+        await updatedFund.save();
+
+        logInfo(`Token launched successfully for fund ${id}`, { tokenAddress, solscanUrl });
+      } catch (error: unknown) {
+        logError(`Background token launch failed for fund ${id}`, error);
+        const updatedFund = await Fund.findById(id);
+        if (updatedFund) {
+          updatedFund.launchError = error instanceof Error ? error.message : "Unknown error during token launch";
+          updatedFund.launchStatus = "failed";
+          await updatedFund.save();
+          logInfo(`Fund ${id} updated with launch failure`, { status: updatedFund.status });
+        }
+      }
+    });
   })
 );
 
@@ -849,7 +861,6 @@ router.get(
   })
 );
 
-// Add this after the existing routes in routes/funds.ts
 router.get(
   "/:id/status",
   asyncHandler(async (req, res) => {
