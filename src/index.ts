@@ -65,7 +65,7 @@ app.use("/api/token-images", tokenImageRoutes);
 // Optional: Middleware for parsing large URL-encoded payloads
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-app.get("/api", (req, res) => {
+app.get("/api/test", (req, res) => {
   res.send("CrowdFund.Fun Server is live!");
 });
 
