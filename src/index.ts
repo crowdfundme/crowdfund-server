@@ -65,11 +65,11 @@ app.use("/api/token-images", tokenImageRoutes);
 // Optional: Middleware for parsing large URL-encoded payloads (if needed elsewhere)
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-app.get("/", (req, res) => {
+app.get("/api", (req, res) => {
   res.send("CrowdFund.Fun Server is live!");
 });
 
-app.get("/status", (req, res) => {
+app.get("/api/status", (req, res) => {
   const isLive = true; // Add any additional health checks here if needed
   res.status(200).json({ isLive });
 });
@@ -87,25 +87,54 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   });
 });
 
-// MongoDB connection with retry logic
+// MongoDB connection with limited retries
+const MAX_RETRIES = 5;
+let retryCount = 0;
+
 const connectDB = async () => {
   try {
     await mongoose.connect(config.MONGO_URI, {
-      serverSelectionTimeoutMS: 5000,
-      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 5000, // Timeout after 5s if no server found
+      connectTimeoutMS: 10000, // Timeout connection attempt after 10s
+      maxPoolSize: 10, // Limit connection pool
+      retryWrites: true,
+      w: "majority",
     });
-    console.log("MongoDB connected");
+    console.log("MongoDB connected successfully");
+    retryCount = 0; // Reset retry count on success
   } catch (err) {
     console.error("MongoDB connection error:", err);
-    setTimeout(connectDB, 5000);
+    if (retryCount < MAX_RETRIES) {
+      retryCount++;
+      console.log(`Retrying connection (${retryCount}/${MAX_RETRIES}) in 5 seconds...`);
+      setTimeout(connectDB, 5000);
+    } else {
+      console.error("Max retries reached. Shutting down server.");
+      process.exit(1); // Exit process if max retries exceeded
+    }
   }
 };
 
-mongoose.connection.on("disconnected", () => {
-  console.warn("MongoDB disconnected, attempting to reconnect...");
-  connectDB();
+// Log connection events for debugging
+mongoose.connection.on("connected", () => {
+  console.log("Mongoose connection established");
 });
 
+mongoose.connection.on("disconnected", () => {
+  console.warn("MongoDB disconnected");
+  // Only attempt reconnect if we haven't hit max retries
+  if (retryCount < MAX_RETRIES) {
+    connectDB();
+  } else {
+    console.error("Not retrying due to max retries reached.");
+  }
+});
+
+mongoose.connection.on("error", (err) => {
+  console.error("MongoDB connection error event:", err);
+});
+
+// Initial connection attempt
 connectDB();
 
 // Start server
