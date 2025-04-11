@@ -29,7 +29,6 @@ const getDonationQueue = async (): Promise<PQueue> => {
 const router = express.Router();
 
 const targetSolMap: { [key: number]: number } = {
-  1: 0.3,
   5: 1.480938417,
   10: 3.114080165,
   25: 9.204131229,
@@ -37,7 +36,7 @@ const targetSolMap: { [key: number]: number } = {
   75: 70.356037153,
 };
 
-const validTargetPercentages = [1, 5, 10, 25, 50, 75] as const;
+const validTargetPercentages = [5, 10, 25, 50, 75] as const;
 type TargetPercentage = typeof validTargetPercentages[number];
 
 const config = getConfig();
@@ -144,7 +143,7 @@ router.post(
     const parsedTargetPercentage = Number(targetPercentage);
     if (!validTargetPercentages.includes(parsedTargetPercentage as TargetPercentage)) {
       logError(`Invalid targetPercentage: ${parsedTargetPercentage}`);
-      return res.status(400).json({ error: "Invalid targetPercentage. Must be one of: 1, 5, 10, 25, 50, 75" });
+      return res.status(400).json({ error: "Invalid targetPercentage. Must be one of: 5, 10, 25, 50, 75" });
     }
     const typedTargetPercentage = parsedTargetPercentage as TargetPercentage;
 
