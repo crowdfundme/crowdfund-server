@@ -324,12 +324,14 @@ router.get(
           const fundJson = fund.toJSON();
           delete fundJson.fundPrivateKey;
           delete fundJson.pumpPortalPrivateKey;
+          delete fundJson.pumpPortalApiKey;
           return { ...fundJson, currentBalance: balance };
         } catch (error) {
           logError(`Failed to fetch balance for fund ${fund._id}`, error);
           const fundJson = fund.toJSON();
           delete fundJson.fundPrivateKey;
           delete fundJson.pumpPortalPrivateKey;
+          delete fundJson.pumpPortalApiKey;
           return { ...fundJson, currentBalance: null };
         }
       })
@@ -831,7 +833,7 @@ router.post(
   })
 );
 
-router.get(
+/*router.get(
   "/:id",
   asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -856,6 +858,55 @@ router.get(
     };
 
     res.json(fundData);
+    logInfo(`Returned fund details for ${id}`, { fundId: id, status: fund.status });
+  })
+);*/
+
+// Route: GET /funds/:id
+
+router.get(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    logInfo(`GET /funds/${id} - Fetching fund details`, { id });
+
+    // Add validation for ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        logError(`Invalid fund ID format: ${id}`);
+        return res.status(400).json({ error: "Invalid fund ID format" });
+    }
+
+    const fund = await Fund.findById(id).populate("userId", "walletAddress");
+    if (!fund) {
+      logError(`Fund ${id} not found`);
+      return res.status(404).json({ error: `Fund with ID ${id} not found` });
+    }
+
+    let currentBalance: number | null = null;
+    try {
+      // Use the Connection object which might be configured for the correct network
+      // const connection = getConnection(); // Uncomment if needed for specific network/config
+      // currentBalance = await getBalance(new PublicKey(fund.fundWalletAddress), connection);
+      // Assuming getBalance defaults to the connection from config if not provided
+      currentBalance = await getBalance(new PublicKey(fund.fundWalletAddress));
+    } catch (error) {
+      logError(`Failed to fetch balance for fund ${id}`, error);
+      // Proceed without balance if fetch fails, client can handle null balance
+    }
+
+    // Convert Mongoose document to a plain JavaScript object
+    const fundData = fund.toJSON();
+
+    // Add the fetched balance (might be null if fetch failed)
+    fundData.currentBalance = currentBalance;
+
+    // FIX: Mask private keys before sending response
+    delete fundData.fundPrivateKey;         // Remove fund's generated private key
+    delete fundData.pumpPortalPrivateKey; // Remove pump.fun related private key (if it exists)
+
+    // Send the modified (masked) data
+    res.json(fundData);
+
     logInfo(`Returned fund details for ${id}`, { fundId: id, status: fund.status });
   })
 );
